@@ -11,8 +11,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/dannolan/boxcar/internal/binfmt"
+	"github.com/klauspost/compress/zstd"
 )
 
 type fileRecord struct {
