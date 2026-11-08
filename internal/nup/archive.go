@@ -216,7 +216,13 @@ func (a *Archive) parse(ctx context.Context) {
 		binfmt.Require(ms <= 32*1024*1024, "Package metadata exceeds 32 MiB.")
 		var metadata []TLV
 		if ms != 0 {
-			binfmt.Require(uint64(bo) <= mo && mo <= uint64(fs) && ms <= uint64(fs)-mo, "Invalid package metadata bounds.")
+			// Metadata may live anywhere in the file as long as it stays
+			// in-bounds and does not overlap other extents (checked below).
+			// The reference implementation additionally requires blobOff <=
+			// metadataOff, which rejects third-party packers that place
+			// metadata in the TOC-to-blob gap (observed in the wild); we
+			// accept them. Documented deviation — see ARCHITECTURE.md.
+			binfmt.Require(mo <= uint64(fs) && ms <= uint64(fs)-mo, "Invalid package metadata bounds.")
 			regions = append(regions, [2]int64{int64(mo), int64(mo) + int64(ms)})
 			var err error
 			metadata, err = parseTlvs(a.readAt(int64(mo), int64(ms)))

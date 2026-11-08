@@ -193,6 +193,13 @@ every push with a pinned reference checkout.
 5. Windows reparse-point checks exist only in `internal/patch` and `internal/nup`
    platform files; other packages check symlinks only.
 6. ASCII-only decimal/hex classification vs Python's Unicode `isdecimal()`.
+7. **NUP metadata placement**: the reference reader requires package metadata
+   to live inside the blob region (`blobOff <= metaOff`). Real-world NUPs
+   packed by other implementations (a55uka's reference packer, observed in a
+   25.6 GB archive) place metadata outside the blob extents entirely. Boxcar
+   accepts metadata anywhere in the file as long as it is in-bounds and does
+   not overlap other extents (the overlap pass already enforces that).
+   Regression test: `internal/nup/archive_reloc_test.go`.
 
 ## Dependency policy
 

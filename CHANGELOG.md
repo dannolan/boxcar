@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **NUP reader: accept third-party-packed archives.** Package metadata may
+  live anywhere in the file (in-bounds, non-overlapping) instead of requiring
+  `blobOff <= metaOff`. Real-world NUPs from other packers were rejected by
+  the reference-implementation rule; Boxcar now reads them and verifies every
+  extent. Regression-tested; golden cross-validation unaffected.
+
 ## 4.0.0-boxcar.1 — 2026-11-08
 
 Initial release. Full Go port of [NSP-Box 4.0.0](https://github.com/smarkyie/NSP-Box/releases/tag/v4.0.0) ("Meet NUP").
