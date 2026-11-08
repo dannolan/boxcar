@@ -1,0 +1,15 @@
+# binaries
+/boxcar
+/boxcar.exe
+/boxcar-linux
+/dist/
+
+# test artifacts
+*.partial
+*.nsp.report.json
+
+# local python reference env (not part of the project)
+/.pyref-venv/
+
+# OS cruft
+.DS_Store

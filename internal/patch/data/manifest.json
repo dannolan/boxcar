@@ -1,0 +1,450 @@
+{
+ "payloads": {
+  "msvc": {
+   "file": "payload-msvc.bin",
+   "entry": 4107,
+   "unwind": [
+    [
+     4096,
+     4107,
+     8308
+    ],
+    [
+     4107,
+     4329,
+     8316
+    ],
+    [
+     4329,
+     4463,
+     8332
+    ],
+    [
+     4463,
+     4995,
+     8348
+    ],
+    [
+     4995,
+     5606,
+     8376
+    ],
+    [
+     5606,
+     5981,
+     8404
+    ]
+   ],
+   "size_slot": 3,
+   "read_slot": 8,
+   "sha256": "f077171e6275a2b34b665f2dd9550cb0168ffad3e982143ac712155f6395cb89"
+  },
+  "msvc-read9": {
+   "file": "payload-msvc-read9.bin",
+   "entry": 4107,
+   "unwind": [
+    [
+     4096,
+     4107,
+     8312
+    ],
+    [
+     4107,
+     4329,
+     8320
+    ],
+    [
+     4329,
+     4463,
+     8336
+    ],
+    [
+     4463,
+     4995,
+     8352
+    ],
+    [
+     4995,
+     5606,
+     8380
+    ],
+    [
+     5606,
+     5981,
+     8408
+    ]
+   ],
+   "size_slot": 3,
+   "read_slot": 9,
+   "sha256": "5f88cb65cb0d8b87acacb5a2c6b314378e63a453b315bc8be93262ee5a982cdc"
+  },
+  "gnu": {
+   "file": "payload-gnu.bin",
+   "entry": 4107,
+   "unwind": [
+    [
+     4096,
+     4107,
+     8304
+    ],
+    [
+     4107,
+     4329,
+     8312
+    ],
+    [
+     4329,
+     4463,
+     8328
+    ],
+    [
+     4463,
+     4995,
+     8344
+    ],
+    [
+     4995,
+     5606,
+     8372
+    ],
+    [
+     5606,
+     5981,
+     8400
+    ]
+   ],
+   "size_slot": 4,
+   "read_slot": 9,
+   "sha256": "1836340d08d72976410b85b0d62d2cd340fa0cbcad88019770dd4cab656d6a1f"
+  },
+  "gnu-read10": {
+   "file": "payload-gnu-read10.bin",
+   "entry": 4107,
+   "unwind": [
+    [
+     4096,
+     4107,
+     8312
+    ],
+    [
+     4107,
+     4329,
+     8320
+    ],
+    [
+     4329,
+     4463,
+     8336
+    ],
+    [
+     4463,
+     4995,
+     8352
+    ],
+    [
+     4995,
+     5606,
+     8380
+    ],
+    [
+     5606,
+     5981,
+     8408
+    ]
+   ],
+   "size_slot": 4,
+   "read_slot": 10,
+   "sha256": "770f2eb4b70c388051fb4afedaaf56ff94ed40dfbdfe904ff3072aec01cdb569"
+  }
+ },
+ "legacy": {
+  "msvc": {
+   "file": "payload-legacy-msvc.bin",
+   "entry": 4107,
+   "unwind": [
+    [
+     4096,
+     4107,
+     8308
+    ],
+    [
+     4107,
+     4329,
+     8316
+    ],
+    [
+     4329,
+     4463,
+     8332
+    ],
+    [
+     4463,
+     4995,
+     8348
+    ],
+    [
+     4995,
+     5606,
+     8376
+    ],
+    [
+     5606,
+     5981,
+     8404
+    ]
+   ],
+   "sha256": "f077171e6275a2b34b665f2dd9550cb0168ffad3e982143ac712155f6395cb89"
+  },
+  "gnu": {
+   "file": "payload-legacy-gnu.bin",
+   "entry": 4107,
+   "unwind": [
+    [
+     4096,
+     4107,
+     8304
+    ],
+    [
+     4107,
+     4329,
+     8312
+    ],
+    [
+     4329,
+     4463,
+     8328
+    ],
+    [
+     4463,
+     4995,
+     8344
+    ],
+    [
+     4995,
+     5606,
+     8372
+    ],
+    [
+     5606,
+     5981,
+     8400
+    ]
+   ],
+   "sha256": "1836340d08d72976410b85b0d62d2cd340fa0cbcad88019770dd4cab656d6a1f"
+  }
+ },
+ "patterns": [
+  {
+   "anchor": "48895c241048897424184889",
+   "normalized_sha256": "d8ec3ee3c13a6a8f76f521d9ec26087fbfadf81d8ddcb5d7715b17b627acb279",
+   "name": "msvc",
+   "abi": "msvc",
+   "kind": "entry",
+   "hook_delta": 0,
+   "expected": "48895c2410",
+   "metadata_call_delta": 544,
+   "reader": {
+    "anchor": "48895c240848895424105556",
+    "normalized_sha256": "0c89e3d146f4d40d1778bae7f929a0378309789971d18d6a438e0a97f95e759a",
+    "size_disp_offset": 35,
+    "read_disp_offset": 130,
+    "mask_file": "mask-msvc-reader.bin"
+   },
+   "mask_file": "mask-msvc.bin"
+  },
+  {
+   "anchor": "415741564155415456575553",
+   "normalized_sha256": "071ed2382c2b6dff83bc50d6819254ad96d5fcd7545a1659c0da277f2871969f",
+   "name": "pgo",
+   "abi": "gnu",
+   "kind": "inline",
+   "hook_delta": 394,
+   "expected": "488d8c2480010000",
+   "metadata_call_delta": 303,
+   "reader": {
+    "anchor": "41565657534883ec784889d6",
+    "normalized_sha256": "f9c3623f346fd4706a7e8fa10818c418966120c078ea4c415bfcb1e83b1b1352",
+    "size_disp_offset": 23,
+    "read_disp_offset": 60,
+    "mask_file": "mask-pgo-reader.bin"
+   },
+   "mask_file": "mask-pgo.bin"
+  },
+  {
+   "anchor": "554157415641554154565753",
+   "normalized_sha256": "77982e377ffee99b353a64774a384b7a2e16426817e527a8d75d34edff80cfc2",
+   "name": "pokedinner",
+   "abi": "msvc-read9",
+   "kind": "inline-pokedinner",
+   "hook_delta": 360,
+   "expected": "4c8d7dc04c89f9",
+   "metadata_call_delta": 336,
+   "reader": {
+    "anchor": "555657534883ec78488d6c24",
+    "normalized_sha256": "579cfcafeeae3ac58fd7d765625bb03761f463575a0bf6e51ab1b47fd717f1d1",
+    "size_disp_offset": 36,
+    "read_disp_offset": 78,
+    "mask_file": "mask-pokedinner-reader.bin"
+   },
+   "mask_file": "mask-pokedinner.bin"
+  },
+  {
+   "anchor": "554157415641554154565753",
+   "normalized_sha256": "df8c138070d09a90875f14348837063552a0f805177e43d6af1a3681c86e1486",
+   "preserve_duplicate_unwind": true,
+   "name": "selevet",
+   "abi": "msvc-read9",
+   "kind": "inline-selevet",
+   "hook_delta": 399,
+   "expected": "4c8bbdb0030000",
+   "metadata_call_delta": 287,
+   "reader": {
+    "anchor": "555657534883ec78488d6c24",
+    "normalized_sha256": "579cfcafeeae3ac58fd7d765625bb03761f463575a0bf6e51ab1b47fd717f1d1",
+    "size_disp_offset": 36,
+    "read_disp_offset": 78,
+    "mask_file": "mask-selevet-reader.bin"
+   },
+   "mask_file": "mask-selevet.bin"
+  }
+ ],
+ "profiles": {
+  "245e350c32af4d91f852b11d9b301ee2f57ff74cf98cbcd0fc25853627a0a106": {
+   "name": "PokeDinner 2.0.0 \u00b7 70ecb39ef0 \u00b7 Windows x64",
+   "file": "eglantine.exe",
+   "abi": "msvc-read9",
+   "hook": 3139128,
+   "expected": "4c8d7dc04c89f9",
+   "kind": "inline-pokedinner"
+  },
+  "e3ec0b859e6e1ff2dec03865a3c8a11b547ad84521898091e21ab1c40d3927ec": {
+   "name": "PokeDinner 2.0.0 \u00b7 70ecb39ef0 \u00b7 Windows x64 CLI",
+   "file": "eden-cli.exe",
+   "abi": "msvc-read9",
+   "hook": 496728,
+   "expected": "4c8d7dc04c89f9",
+   "kind": "inline-pokedinner"
+  },
+  "1528c11cff882d5b8b7d0dda83b57925700201b55f13471c8b62c79ea1275db8": {
+   "name": "Eglantine build 96 \u00b7 Windows x64",
+   "file": "eglantine.exe",
+   "abi": "msvc",
+   "hook": 4561984,
+   "expected": "48895c2410",
+   "kind": "entry"
+  },
+  "cb89d931b603f604afe552ace6bbdde1a4dbbcf6431919b04c739043e30d19d4": {
+   "name": "Eglantine build 96 \u00b7 Windows x64 CLI",
+   "file": "eden-cli.exe",
+   "abi": "msvc",
+   "hook": 2699296,
+   "expected": "48895c2410",
+   "kind": "entry"
+  },
+  "a5e408544daa7a20d9506024410a468cb235cdedcfb9a6a7a8c9c2bcce43a8a0": {
+   "name": "Eglantine build 96 \u00b7 Windows x64 PGO",
+   "file": "eglantine.exe",
+   "abi": "gnu",
+   "hook": 128746,
+   "expected": "488d8c2480010000",
+   "kind": "inline"
+  },
+  "37f8ad2a67e6b6faf6f1d513d1adac12c5bfb144cf6bb53807bda008f059c7e7": {
+   "name": "Eglantine build 96 \u00b7 Windows x64 PGO CLI",
+   "file": "eden-cli.exe",
+   "abi": "gnu",
+   "hook": 129322,
+   "expected": "488d8c2480010000",
+   "kind": "inline"
+  },
+  "8a7d642b771e86a2b5ea7a01cfe4cae843fa0ef42e63d36adf29c74e21bd0f46": {
+   "name": "Eglantine AMD Experimental 77-2 \u00b7 build-99 \u00b7 Windows x64",
+   "file": "eglantine.exe",
+   "abi": "msvc",
+   "hook": 4561792,
+   "expected": "48895c2410",
+   "kind": "entry"
+  },
+  "fc72e73e57c69fd49e37ba23cc666bc52c93655b823bd8eda73db043eca661e8": {
+   "name": "Eglantine AMD Experimental 77-2 \u00b7 build-99 \u00b7 Windows x64 CLI",
+   "file": "eden-cli.exe",
+   "abi": "msvc",
+   "hook": 2699296,
+   "expected": "48895c2410",
+   "kind": "entry"
+  },
+  "706a29bec23c290d6266c02ed5d7f7309f1311f00008e91ec90e699184d5e168": {
+   "name": "Eglantine AMD Experimental 77-2 \u00b7 build-99 \u00b7 Windows x64 PGO",
+   "file": "eglantine.exe",
+   "abi": "gnu",
+   "hook": 128394,
+   "expected": "488d8c2480010000",
+   "kind": "inline"
+  },
+  "ef8c6edb004836975d0b9d5e31ed1b86d46a0bf3cecdaa21be1b42f73e94c9fa": {
+   "name": "Eglantine AMD Experimental 77-2 \u00b7 build-99 \u00b7 Windows x64 PGO CLI",
+   "file": "eden-cli.exe",
+   "abi": "gnu",
+   "hook": 128970,
+   "expected": "488d8c2480010000",
+   "kind": "inline"
+  },
+  "2b082c0ebe192f14675f277c537c8503cdeab8c2ec4c5b6a05cb460dbfaf82b1": {
+   "name": "Eglantine nx2 build 98 \u00b7 adae763 \u00b7 Windows x64",
+   "file": "eglantine.exe",
+   "abi": "msvc",
+   "hook": 4561984,
+   "expected": "48895c2410",
+   "kind": "entry"
+  },
+  "c563fd0ed22d00743d292fd2d8b8f53d809bdd3b64f7a3707cba357a0aece38b": {
+   "name": "Eglantine nx2 build 98 \u00b7 adae763 \u00b7 Windows x64 CLI",
+   "file": "eden-cli.exe",
+   "abi": "msvc",
+   "hook": 2699296,
+   "expected": "48895c2410",
+   "kind": "entry"
+  },
+  "27316ad961d92671a1f67851c82871e7fe597ca20bed79b2a2d0c2746fd1a734": {
+   "name": "Eglantine nx2 build 98 \u00b7 adae763 \u00b7 Windows x64 PGO",
+   "file": "eglantine.exe",
+   "abi": "gnu",
+   "hook": 128746,
+   "expected": "488d8c2480010000",
+   "kind": "inline"
+  },
+  "569755d7dcf8691165b6283bbff562bdcd45356eae79881dee5c3dc665950d27": {
+   "name": "Eglantine nx2 build 98 \u00b7 adae763 \u00b7 Windows x64 PGO CLI",
+   "file": "eden-cli.exe",
+   "abi": "gnu",
+   "hook": 129322,
+   "expected": "488d8c2480010000",
+   "kind": "inline"
+  },
+  "c7e829d5b3d9610ab2961e3835b6464ad332c8fdb15820143fce57507b30c955": {
+   "name": "PokeDinner 2.1.0a \u00b7 Windows x64",
+   "file": "eglantine.exe",
+   "abi": "msvc-read9",
+   "hook": 3139128,
+   "expected": "4c8d7dc04c89f9",
+   "kind": "inline-pokedinner"
+  },
+  "54807b5a6bf65c8af6c3c10a0aab63b9e8903ad27025ac69921cb9b59780b3f0": {
+   "name": "PokeDinner 2.1.0a \u00b7 Windows x64 CLI",
+   "file": "eden-cli.exe",
+   "abi": "msvc-read9",
+   "hook": 496728,
+   "expected": "4c8d7dc04c89f9",
+   "kind": "inline-pokedinner"
+  },
+  "b592bc3059f64dfe9e8d09e55a6bb780af9dca7149a7650f9d3e9450d856a96e": {
+   "name": "Selevet performance build 4 \u00b7 normal / 30 FPS \u00b7 Windows x64",
+   "file": "eglantine.exe",
+   "abi": "msvc-read9",
+   "hook": 26341599,
+   "expected": "4c8bbdb0030000",
+   "kind": "inline-selevet",
+   "preserve_duplicate_unwind": true
+  }
+ }
+}

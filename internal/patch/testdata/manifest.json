@@ -1,0 +1,73 @@
+[
+ {
+  "name": "entry",
+  "revision": 2,
+  "in": "entry.in.bin",
+  "out": "entry.out.bin",
+  "profile": {
+   "name": "t",
+   "file": "eglantine.exe",
+   "abi": "msvc",
+   "hook": 4096,
+   "expected": "48895c2410",
+   "kind": "entry"
+  }
+ },
+ {
+  "name": "inline",
+  "revision": 2,
+  "in": "inline.in.bin",
+  "out": "inline.out.bin",
+  "profile": {
+   "name": "t",
+   "file": "eglantine.exe",
+   "abi": "gnu",
+   "hook": 4096,
+   "expected": "488d8c2480010000",
+   "kind": "inline"
+  }
+ },
+ {
+  "name": "inline-pokedinner",
+  "revision": 2,
+  "in": "inline-pokedinner.in.bin",
+  "out": "inline-pokedinner.out.bin",
+  "profile": {
+   "name": "t",
+   "file": "eglantine.exe",
+   "abi": "msvc-read9",
+   "hook": 4096,
+   "expected": "4c8d7dc04c89f9",
+   "kind": "inline-pokedinner"
+  }
+ },
+ {
+  "name": "inline-selevet",
+  "revision": 2,
+  "in": "inline-selevet.in.bin",
+  "out": "inline-selevet.out.bin",
+  "profile": {
+   "name": "t",
+   "file": "eglantine.exe",
+   "abi": "msvc-read9",
+   "hook": 4096,
+   "expected": "4c8bbdb0030000",
+   "kind": "inline-selevet",
+   "preserve_duplicate_unwind": true
+  }
+ },
+ {
+  "name": "entry-legacy",
+  "revision": 1,
+  "in": "entry-legacy.in.bin",
+  "out": "entry-legacy.out.bin",
+  "profile": {
+   "name": "t",
+   "file": "eglantine.exe",
+   "abi": "msvc",
+   "hook": 4096,
+   "expected": "48895c2410",
+   "kind": "entry"
+  }
+ }
+]
