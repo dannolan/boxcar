@@ -1,0 +1,4 @@
+# Helps search tools (ripgrep, ag, editor indexes) skip machine-local dirs
+.pyref-venv/
+nsp-box-src/
+dist/

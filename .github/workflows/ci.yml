@@ -19,13 +19,37 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go build ./...
-      - run: go vet ./...
-      - name: Test
-        run: go test ./internal/... ./cmd/... -count=1
-      - name: Race detector (Linux only)
+      - name: Check (build + vet + gofmt + tests)
+        run: make check
+      - name: Race detector
         if: runner.os == 'Linux'
-        run: go test -race ./internal/nup/ ./internal/nsp/ ./internal/nuptools/
+        run: make race
+
+  golden:
+    # STRICT byte-exactness validation against the pinned Python reference.
+    name: golden (byte-exactness vs Python reference)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Checkout reference implementation (pinned)
+        uses: actions/checkout@v4
+        with:
+          repository: smarkyie/NSP-Box
+          ref: c3de7a120cb4b3c86cd5b5bcdbf5f33bbffe0fc0
+          path: nsp-box-src
+      - name: Set up Python reference env
+        run: |
+          python3 -m venv .pyref-venv
+          .pyref-venv/bin/pip install --disable-pip-version-check 'Pillow==12.2.0' 'zstandard==0.25.0'
+      - name: Run golden tests (strict)
+        env:
+          NSPBOX_PYTHON: ${{ github.workspace }}/.pyref-venv/bin/python
+          NSPBOX_PYREF: ${{ github.workspace }}/nsp-box-src/src
+          NSPBOX_REQUIRE_PYREF: "1"
+        run: make golden
 
   windows:
     runs-on: windows-latest
@@ -42,11 +66,3 @@ jobs:
           GOOS: linux
           GOARCH: arm64
 
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: test -z "$(gofmt -l internal cmd)" || (gofmt -l internal cmd && exit 1)

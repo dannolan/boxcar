@@ -17,6 +17,7 @@ import (
 	"github.com/dannolan/boxcar/internal/region"
 	"github.com/dannolan/boxcar/internal/romfs"
 	"github.com/dannolan/boxcar/internal/stream"
+	"github.com/dannolan/boxcar/internal/testutil"
 )
 
 const (
@@ -374,7 +375,7 @@ func buildBaseGameNSP(t *testing.T, baseTid uint64) string {
 
 const crosscheckPy = `
 import os, sys
-sys.path.insert(0, os.environ.get('NSPBOX_PYREF', '/Users/dan/Downloads/nsp-box-src/src'))
+sys.path.insert(0, os.environ["NSPBOX_PYREF"])
 import dlc
 from pathlib import Path
 
@@ -394,22 +395,12 @@ elif mode == 'verify':
     print('VERIFIED', n)
 `
 
-func findPython(t *testing.T) string {
-	t.Helper()
-	venv := envOr("NSPBOX_PYTHON", "/Users/dan/Downloads/nsp-box-go/.pyref-venv/bin/python")
-	if fi, err := os.Stat(venv); err == nil && !fi.IsDir() {
-		return venv
-	}
-	if p, err := exec.LookPath("python3"); err == nil {
-		return p
-	}
-	t.Skip("python3 unavailable; skipping gold cross-check")
-	return ""
-}
-
 func runPython(t *testing.T, python, script string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(python, append([]string{script}, args...)...)
+	if ref, ok := testutil.PyRef(); ok {
+		cmd.Env = append(os.Environ(), "NSPBOX_PYREF="+ref)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("python %v failed: %v\n%s", args, err, out)
@@ -419,8 +410,8 @@ func runPython(t *testing.T, python, script string, args ...string) string {
 
 func TestCrossCheckPython(t *testing.T) {
 	ctx := context.Background()
-	python := findPython(t)
-	if _, err := os.Stat(filepath.Join(envOr("NSPBOX_PYREF", "/Users/dan/Downloads/nsp-box-src/src"), "dlc.py")); err != nil {
+	python, pyref := testutil.SkipUnlessPyRef(t)
+	if _, err := os.Stat(filepath.Join(pyref, "dlc.py")); err != nil {
 		t.Skip("python reference source not found; skipping gold cross-check")
 	}
 
@@ -463,11 +454,4 @@ func TestCrossCheckPython(t *testing.T) {
 
 	// Python dlc.verify must accept the Go-produced NSP.
 	runPython(t, python, script, "verify", root, testTIDHex, "0", goOut)
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

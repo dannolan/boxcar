@@ -13,6 +13,7 @@ import (
 	"github.com/dannolan/boxcar/internal/pfs0"
 	"github.com/dannolan/boxcar/internal/region"
 	"github.com/dannolan/boxcar/internal/snapshot"
+	"github.com/dannolan/boxcar/internal/testutil"
 )
 
 // buildNPDM builds a minimal META/ACI0 main.npdm carrying the given title ID.
@@ -201,7 +202,7 @@ func TestSourceMutationDetected(t *testing.T) {
 
 const pythonScript = `
 import os, sys
-sys.path.insert(0, os.environ.get('NSPBOX_PYREF', '/Users/dan/Downloads/nsp-box-src/src'))
+sys.path.insert(0, os.environ["NSPBOX_PYREF"])
 from pathlib import Path
 import engine
 
@@ -226,15 +227,13 @@ elif mode == 'verify':
 
 func runPython(t *testing.T, args ...string) string {
 	t.Helper()
-	python := envOr("NSPBOX_PYTHON", "/Users/dan/Downloads/nsp-box-go/.pyref-venv/bin/python")
-	if _, err := os.Stat(python); err != nil {
-		t.Skip("venv python not available")
-	}
+	python, pyref := testutil.SkipUnlessPyRef(t)
 	script := filepath.Join(t.TempDir(), "script.py")
 	if err := os.WriteFile(script, []byte(pythonScript), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(python, append([]string{script}, args...)...)
+	cmd.Env = append(os.Environ(), "NSPBOX_PYREF="+pyref)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("python failed: %v\n%s", err, out)
@@ -246,10 +245,9 @@ func runPython(t *testing.T, args ...string) string {
 // engine and compares the NSP byte-for-byte, then runs the Python verifier on
 // the Go-produced NSP. It skips gracefully when the venv Python is absent.
 func TestGoldenCrossCheck(t *testing.T) {
-	python := envOr("NSPBOX_PYTHON", "/Users/dan/Downloads/nsp-box-go/.pyref-venv/bin/python")
-	if _, err := os.Stat(python); err != nil {
-		t.Skip("venv python not available; skipping golden cross-check")
-	}
+	python, _ := testutil.SkipUnlessPyRef(t)
+
+	_ = python // runPython resolves the same environment
 
 	root := t.TempDir()
 	writeSnapshot(t, root, 0x0100000000010000, map[string][]byte{
@@ -294,11 +292,4 @@ func TestGoldenCrossCheck(t *testing.T) {
 	if !strings.HasPrefix(out, "OK") {
 		t.Errorf("Python verify_image rejected the Go NSP: %s", out)
 	}
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

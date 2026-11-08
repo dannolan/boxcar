@@ -13,9 +13,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/klauspost/compress/zstd"
 	"github.com/dannolan/boxcar/internal/binfmt"
 	"github.com/dannolan/boxcar/internal/diskfree"
+	"github.com/klauspost/compress/zstd"
 )
 
 type fileNode struct {

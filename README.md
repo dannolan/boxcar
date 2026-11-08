@@ -1,3 +1,18 @@
+---
+title: Boxcar
+description: "Switch 2 game packager in Go: NSP builder, NUP archives, DLC, reversible emulator patch. Byte-exact Go port of NSP-Box."
+version: 4.0.0-boxcar.1
+repository: https://github.com/dannolan/boxcar
+license: MIT
+language: go
+platforms: [macos, windows, linux]
+agents:
+  guide: AGENTS.md
+  architecture: ARCHITECTURE.md
+  golden-tests: docs/PYREF.md
+topics: [nintendo-switch, nsp, nup, emulator, packager, cli, go]
+---
+
 <div align="center">
 
 # 📦 Boxcar
@@ -32,6 +47,8 @@ It is a faithful port of [smarkyie's NSP-Box](https://github.com/smarkyie/NSP-Bo
 | GUI | Tkinter desktop app | CLI (GUI planned) |
 
 The packaging core — PFS0/HFS0, RomFS/IVFC, NCA, CNMT/NACP/NPDM, NUP v1, PE patching — has **zero OS dependencies** in either implementation, so the port runs everywhere and can even patch Windows emulator executables *from* Linux or macOS.
+
+**For AI coding agents**: start at [AGENTS.md](AGENTS.md) — commands, non-negotiables, and the package map. Architecture + contracts: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Install
 
@@ -144,7 +161,7 @@ Port correctness is enforced by golden cross-validation against the Python origi
 - ✅ NUP archives **cross-verify in both directions** (Go reads Python archives, Python reads Go archives)
 - ✅ NSP → NUP → NSP round trip **byte-identical**
 
-Known deviations: artwork input formats are PNG/JPEG/GIF/BMP/TIFF/WEBP (no AVIF/ICNS/JPEG2000 in pure Go); NUP zstd levels map to Go's klauspost speed tiers, so compressed sizes differ slightly (format stays cross-compatible); NSP→NUP conversion materializes region-backed files to temp files instead of mmap streaming. Full list: [PORTING.md](PORTING.md).
+Known deviations: artwork input formats are PNG/JPEG/GIF/BMP/TIFF/WEBP (no AVIF/ICNS/JPEG2000 in pure Go); NUP zstd levels map to Go's klauspost speed tiers, so compressed sizes differ slightly (format stays cross-compatible); NSP→NUP conversion materializes region-backed files to temp files instead of mmap streaming. Full list: [ARCHITECTURE.md](ARCHITECTURE.md) § Deviations.
 
 ## Layout
 
@@ -160,14 +177,22 @@ internal/
   artwork/ keys/                      icons + key placeholders
 ```
 
-Module contracts and the port's design rules live in [PORTING.md](PORTING.md). Implementation notes from the original project: [TECHNICAL_NOTES.md](https://github.com/smarkyie/NSP-Box/blob/main/TECHNICAL_NOTES.md), [NUP.md](https://github.com/smarkyie/NSP-Box/blob/main/NUP.md), [EMULATOR_PATCH.md](https://github.com/smarkyie/NSP-Box/blob/main/EMULATOR_PATCH.md), [DLC.md](https://github.com/smarkyie/NSP-Box/blob/main/DLC.md).
+Module contracts and the port's design rules live in [ARCHITECTURE.md](ARCHITECTURE.md). Agent operating guide: [AGENTS.md](AGENTS.md).
 
 ## Testing
 
 ```bash
-go test ./... -count=1      # full suite
-go test -race ./internal/nup/ ./internal/nsp/
+make check        # what CI runs: build + vet + gofmt + tests
+make golden       # STRICT byte-exactness vs the Python reference (skips fail)
+make race         # race detector on concurrent packages
+make cross        # all release binaries into dist/
 ```
+
+Golden tests compare Boxcar's output against the original Python
+implementation and **skip silently** when the reference environment is
+missing — set it up once with `make pyref` (see [docs/PYREF.md](docs/PYREF.md))
+so a green suite actually proves byte-exactness. CI runs the strict mode on
+every push against a pinned reference commit.
 
 ## License
 

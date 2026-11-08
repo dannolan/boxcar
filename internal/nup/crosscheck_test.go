@@ -4,32 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/dannolan/boxcar/internal/testutil"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 )
 
-var (
-	pyrefPython = envOr("NSPBOX_PYTHON", "/Users/dan/Downloads/nsp-box-go/.pyref-venv/bin/python")
-	pyrefSrc    = envOr("NSPBOX_PYREF", "/Users/dan/Downloads/nsp-box-src/src")
-)
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
-func havePython() bool {
-	if _, err := os.Stat(pyrefPython); err != nil {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(pyrefSrc, "nup_format.py")); err != nil {
-		return false
-	}
-	return true
+func havePython(t *testing.T) (python, src string) {
+	return testutil.SkipUnlessPyRef(t)
 }
 
 // crossFile is one synthetic source file shared by the Go and Python builders.
@@ -87,11 +70,12 @@ func writeCrosscheckSources(t *testing.T, dir string) ([]Package, map[string][]b
 // runPython writes script to a temp file and runs it with the reference venv.
 func runPython(t *testing.T, dir, script string, args ...string) {
 	t.Helper()
+	python, _ := testutil.SkipUnlessPyRef(t)
 	scriptPath := filepath.Join(dir, "script.py")
 	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(pyrefPython, append([]string{scriptPath}, args...)...)
+	cmd := exec.Command(python, append([]string{scriptPath}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("python failed: %v\n%s", err, out)
@@ -117,7 +101,7 @@ func compareExtracted(t *testing.T, extractDir string, expected map[string][]byt
 
 // pythonBuildScript packs the shared source files into a NUP using the Python
 // reference implementation.
-func pythonBuildScript() string {
+func pythonBuildScript(src string) string {
 	return fmt.Sprintf(`import sys, os
 sys.path.insert(0, %q)
 import nup_format as nf
@@ -147,12 +131,12 @@ dlc = nf.Package(TID | 0x1000, 0, 2, files={
 
 nf.pack([base, update, dlc], out, level=3, large_raw=True, verify=True)
 print('OK')
-`, pyrefSrc)
+`, src)
 }
 
 // pythonVerifyExtractScript verifies and extracts a NUP using the Python
 // reference implementation.
-func pythonVerifyExtractScript() string {
+func pythonVerifyExtractScript(src string) string {
 	return fmt.Sprintf(`import sys
 sys.path.insert(0, %q)
 import nup_format as nf
@@ -164,20 +148,18 @@ with nf.Archive(nup) as a:
     a.verify()
 nf.extract(nup, out)
 print('OK')
-`, pyrefSrc)
+`, src)
 }
 
 func TestCrossValidation(t *testing.T) {
-	if !havePython() {
-		t.Skip("python reference venv not found")
-	}
+	_, pyrefSrc := havePython(t)
 	ctx := context.Background()
 	dir := t.TempDir()
 	packages, expected := writeCrosscheckSources(t, dir)
 
 	// (a) Python builds gold.nup; Go opens, verifies and extracts it.
 	gold := filepath.Join(dir, "gold.nup")
-	runPython(t, dir, pythonBuildScript(), dir, gold)
+	runPython(t, dir, pythonBuildScript(pyrefSrc), dir, gold)
 
 	a, err := Open(ctx, gold)
 	if err != nil {
@@ -203,6 +185,6 @@ func TestCrossValidation(t *testing.T) {
 		t.Fatalf("Pack(gold-go.nup): %v", err)
 	}
 	pyExtract := filepath.Join(dir, "py-extract")
-	runPython(t, dir, pythonVerifyExtractScript(), goldGo, pyExtract)
+	runPython(t, dir, pythonVerifyExtractScript(pyrefSrc), goldGo, pyExtract)
 	compareExtracted(t, pyExtract, expected)
 }
