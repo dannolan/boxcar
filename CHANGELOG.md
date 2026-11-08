@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.0.0+boxcar.1 — 2026-11-08
+## 4.0.0-boxcar.1 — 2026-11-08
 
 Initial release. Full Go port of [NSP-Box 4.0.0](https://github.com/smarkyie/NSP-Box/releases/tag/v4.0.0) ("Meet NUP").
 

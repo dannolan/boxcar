@@ -1,0 +1,97 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build, package and checksum
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGE="dist"
+          mkdir -p "$STAGE"
+
+          build() {
+            local os="$1" arch="$2"
+            local ext=""
+            [ "$os" = "windows" ] && ext=".exe"
+            local name="boxcar-$VERSION-$os-$arch"
+            mkdir -p "$STAGE/$name"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w" -o "$STAGE/$name/boxcar$ext" ./cmd/boxcar
+            cp README.md LICENSE DISCLAIMER.md THIRD_PARTY_NOTICES.md "$STAGE/$name/"
+            if [ "$os" = "windows" ]; then
+              (cd "$STAGE" && zip -q -r "$name.zip" "$name")
+            else
+              tar -czf "$STAGE/$name.tar.gz" -C "$STAGE" "$name"
+            fi
+            rm -rf "$STAGE/$name"
+          }
+
+          build linux amd64
+          build linux arm64
+          build windows amd64
+          build windows arm64
+          build darwin amd64
+          build darwin arm64
+
+          # macOS universal binary (Apple Silicon + Intel in one)
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o "$STAGE/boxcar-x86_64" ./cmd/boxcar
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -trimpath -ldflags "-s -w" -o "$STAGE/boxcar-arm64e" ./cmd/boxcar
+          UNI="$STAGE/boxcar-$VERSION-darwin-universal"
+          mkdir -p "$UNI"
+          lipo -create "$STAGE/boxcar-x86_64" "$STAGE/boxcar-arm64e" -output "$UNI/boxcar"
+          lipo -info "$UNI/boxcar"
+          rm "$STAGE/boxcar-x86_64" "$STAGE/boxcar-arm64e"
+          cp README.md LICENSE DISCLAIMER.md THIRD_PARTY_NOTICES.md "$UNI/"
+          tar -czf "$STAGE/boxcar-$VERSION-darwin-universal.tar.gz" -C "$STAGE" "boxcar-$VERSION-darwin-universal"
+          rm -rf "$UNI"
+
+          (cd "$STAGE" && shasum -a 256 *.tar.gz *.zip > SHA256SUMS.txt)
+          ls -la "$STAGE"
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "Boxcar ${GITHUB_REF_NAME#v}" \
+            --notes-file - <<NOTES
+          # Boxcar ${GITHUB_REF_NAME#v}
+
+          Go port of [NSP-Box 4.0.0](https://github.com/smarkyie/NSP-Box) — Switch 2 game packager: NSP builder, NUP tools, DLC packager, reversible emulator patch.
+
+          ## Downloads
+          | Archive | Use on |
+          |---|---|
+          | `boxcar-...-darwin-universal.tar.gz` | macOS — Apple Silicon **and** Intel (recommended) |
+          | `boxcar-...-darwin-arm64.tar.gz` | macOS Apple Silicon (M1+) |
+          | `boxcar-...-darwin-amd64.tar.gz` | macOS Intel |
+          | `boxcar-...-windows-amd64.zip` | Windows 10/11 x64 |
+          | `boxcar-...-windows-arm64.zip` | Windows on ARM |
+          | `boxcar-...-linux-amd64.tar.gz` | Linux x64 |
+          | `boxcar-...-linux-arm64.tar.gz` | Linux ARM64 |
+
+          Extract, then run `./boxcar --help` (Windows: `boxcar.exe`). macOS binaries are unsigned — if Gatekeeper complains, run `xattr -d com.apple.quarantine boxcar`.
+
+          Verify with `shasum -a 256 -c SHA256SUMS.txt` (or `certutil -hashfile` on Windows).
+
+          ⚠️ Piracy is not supported — lawfully obtained content only. See DISCLAIMER.md. Not affiliated with Nintendo.
+          NOTES

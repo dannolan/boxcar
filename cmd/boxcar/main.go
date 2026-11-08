@@ -22,7 +22,7 @@ import (
 	"github.com/dannolan/boxcar/internal/snapshot"
 )
 
-const version = "4.0.0+boxcar.1"
+const version = "4.0.0-boxcar.1"
 
 func main() {
 	os.Exit(run(os.Args[1:]))

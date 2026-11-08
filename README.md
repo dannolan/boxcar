@@ -6,6 +6,11 @@
 
 A Go port of [NSP-Box](https://github.com/smarkyie/NSP-Box) (v4.0.0).
 
+[![CI](https://github.com/dannolan/boxcar/actions/workflows/ci.yml/badge.svg)](https://github.com/dannolan/boxcar/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](#install)
+
 </div>
 
 ---
@@ -30,6 +35,40 @@ The packaging core — PFS0/HFS0, RomFS/IVFC, NCA, CNMT/NACP/NPDM, NUP v1, PE pa
 
 ## Install
 
+### Prebuilt binaries (recommended)
+
+Grab the latest release: **[github.com/dannolan/boxcar/releases/latest](https://github.com/dannolan/boxcar/releases/latest)**
+
+| Download | Use on |
+|---|---|
+| 🍎 `boxcar-…-darwin-universal.tar.gz` | **macOS — Apple Silicon *and* Intel in one (recommended)** |
+| `boxcar-…-darwin-arm64.tar.gz` | macOS Apple Silicon (M1/M2/M3/M4) |
+| `boxcar-…-darwin-amd64.tar.gz` | macOS Intel |
+| `boxcar-…-windows-amd64.zip` | Windows 10/11 x64 |
+| `boxcar-…-windows-arm64.zip` | Windows on ARM |
+| `boxcar-…-linux-amd64.tar.gz` | Linux x64 |
+| `boxcar-…-linux-arm64.tar.gz` | Linux ARM64 |
+
+macOS:
+
+```bash
+tar -xzf boxcar-*.tar.gz
+cd boxcar-*/
+xattr -d com.apple.quarantine boxcar   # binaries are unsigned; silence Gatekeeper once
+./boxcar --help
+```
+
+Windows: extract the ZIP and run `boxcar.exe` (SmartScreen may ask — *More info → Run anyway*).
+
+Verify a download:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt        # macOS / Linux
+certutil -hashfile boxcar-4.0.0-windows-amd64.zip SHA256   # Windows
+```
+
+### From source
+
 ```bash
 go install github.com/dannolan/boxcar/cmd/boxcar@latest
 # or from a clone:
@@ -39,7 +78,7 @@ go build -o boxcar ./cmd/boxcar
 Cross-compile for a friend:
 
 ```bash
-GOOS=windows GOARCH=amd64 go build -o boxcar.exe ./cmd/boxcar
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o boxcar.exe ./cmd/boxcar
 ```
 
 ## Usage
