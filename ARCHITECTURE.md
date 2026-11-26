@@ -193,7 +193,10 @@ every push with a pinned reference checkout.
   sanctioned replacement is `nup.Optimize` in in-place mode: only after the
   temp file is verified and the source's size/mtime are re-checked, through
   `replaceFile` (POSIX `rename`; Windows `MoveFileEx` with
-  `REPLACE_EXISTING|WRITE_THROUGH`).
+  `REPLACE_EXISTING|WRITE_THROUGH`). For new outputs `nup.Optimize` uses
+  `commitNew`: `commitFile`, falling back on POSIX filesystems without hard
+  links (exFAT/FAT32) to an `O_EXCL` claim replaced by `rename`, which
+  still never overwrites an existing file.
 - **Links refused**: symlinks everywhere; reparse points on Windows
   (`patch_windows.go`/`platform_windows.go`). Error text mirrors Python.
 - **No mmap**: all random access goes through `internal/region`.

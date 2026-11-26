@@ -82,12 +82,15 @@ asks for.
 - The source is checked as it is read, including duplicate copies that
   deduplication drops. A damaged source fails the run instead of being
   silently repaired.
-- `--output` never overwrites an existing file. `--in-place` replaces the
+- `--output` never overwrites an existing file. (On filesystems without hard
+  links, such as exFAT and FAT32 SD cards, the name is claimed first and
+  the claim is then replaced atomically.) `--in-place` replaces the
   original only after verification, and only if the original's size and
   modification time are unchanged, with a single atomic rename (POSIX
-  `rename`, Windows `MoveFileEx`). Permissions are kept. If the rewrite is
-  not smaller, the original is kept unless a policy fix, `--latest-snapshot`
-  or `--force` requires the rewrite.
+  `rename`, Windows `MoveFileEx`). Permissions are kept where the
+  filesystem stores them. If the rewrite is not smaller, the original is
+  kept unless a policy fix, `--latest-snapshot` or `--force` requires the
+  rewrite.
 - Errors and Ctrl-C remove the partial file and leave the original as it
   was. A second Ctrl-C exits immediately. After a hard kill or power loss the
   original is still intact; a stray `*.partial` file may remain and can be
@@ -181,7 +184,9 @@ rewrites the compressed files above it as raw, so the archive may grow;
 that is expected.
 
 Copy the optimized `.nup` into the `games` folder that nx2-flow uses
-(`/nx2-flow/games/` by default). Boxcar works on single-file archives; if
+(`/nx2-flow/games/` by default), or write it there directly with
+`--output` (exFAT and FAT32 cards work; the temporary file needs room on
+the card). Boxcar works on single-file archives; if
 your card is FAT32 and the archive is 4 GiB or more, optimize the single
 file first and then split it the way nx2-flow's
 [docs/layout.md](https://github.com/Olmectron/nx2-flow/blob/main/docs/layout.md)
