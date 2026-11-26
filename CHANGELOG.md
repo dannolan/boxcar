@@ -7,6 +7,11 @@
   `blobOff <= metaOff`. Real-world NUPs from other packers were rejected by
   the reference-implementation rule; Boxcar now reads them and verifies every
   extent. Regression-tested; golden cross-validation unaffected.
+- **NUP packing: configurable storage policy.** `--large-file-threshold`
+  (default `256MiB`, the reference value) sets the size above which
+  `--large-files-raw` keeps files uncompressed, and `--min-savings PCT`
+  (default `0`) stores a file raw unless zstd saves at least that share of it.
+  Defaults reproduce the previous output byte for byte.
 - **NUP reader: accept KaiDump empty files.** KaiDump stores the blob cursor
   as a zero-length file's extent offset; the reader now ignores that offset
   (size and codec must still be zero) instead of rejecting the archive.

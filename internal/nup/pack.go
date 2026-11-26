@@ -50,6 +50,7 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 	}
 	validatePackages(packages)
 	binfmt.Require(level == 1 || level == 3 || level == 9, "Choose compression level 1, 3 or 9.")
+	policy := newCodecPolicy(opts.LargeRaw, opts.LargeFileThreshold, opts.MinSavings)
 
 	abs, err := filepath.Abs(output)
 	if err != nil {
@@ -129,7 +130,7 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 					extentErr = err
 					return
 				}
-				stored, digest, codec = writeExtent(ctx, out, source, dr.stream, dr.first, level, opts.LargeRaw, onRead, dr.digest)
+				stored, digest, codec = writeExtent(ctx, out, source, dr.stream, dr.first, level, policy, onRead, dr.digest)
 			}()
 			if extentErr != nil {
 				return res, extentErr
@@ -319,10 +320,12 @@ func dedupStream(ctx context.Context, source *Source, prefixes map[fpKey]bool, s
 }
 
 // writeExtent writes one file extent, compressing with zstd (or storing raw),
-// with an early raw fallback (port of nup_format.write_extent).
-func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.ReadCloser, first []byte, level int, largeRaw bool, onRead func(int64), knownDigest []byte) (stored int64, digest []byte, codec int) {
+// with an early raw fallback (port of nup_format.write_extent). With the
+// default policy a frame is kept only when it is smaller than the file.
+func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.ReadCloser, first []byte, level int, policy codecPolicy, onRead func(int64), knownDigest []byte) (stored int64, digest []byte, codec int) {
 	start, _ := out.Seek(0, io.SeekCurrent)
-	codecBool := chooseCodec(source.size, largeRaw)
+	codecBool := policy.compress(source.size)
+	limit := policy.maxStored(source.size)
 	h := sha256.New()
 	var count int64
 	failed := false
@@ -371,7 +374,7 @@ func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.Re
 		b = buf[:n]
 		if enc != nil {
 			cur, _ := out.Seek(0, io.SeekCurrent)
-			if cur-start >= source.size {
+			if cur-start > limit {
 				failed = true
 				enc = nil
 			}
@@ -393,7 +396,7 @@ func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.Re
 		binfmt.Require(bytes.Equal(knownDigest, digest), "Source changed after duplicate checking.")
 	}
 
-	if failed || (enc != nil && stored >= source.size) {
+	if failed || (enc != nil && stored > limit) {
 		if _, err := out.Seek(start, io.SeekStart); err != nil {
 			binfmt.Fail("%v", err)
 		}

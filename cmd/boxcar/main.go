@@ -234,6 +234,8 @@ func runNup(args []string) int {
 	preset := fs.String("preset", "Balanced", "")
 	largeRaw := fs.Bool("large-files-raw", true, "")
 	noLargeRaw := fs.Bool("no-large-files-raw", false, "")
+	largeThreshold := fs.String("large-file-threshold", "256MiB", "")
+	minSavings := fs.Float64("min-savings", 0, "")
 	latestSnapshot := fs.Bool("latest-snapshot", true, "")
 	noLatestSnapshot := fs.Bool("no-latest-snapshot", false, "")
 	verify := fs.Bool("verify", true, "")
@@ -249,12 +251,18 @@ func runNup(args []string) int {
 		fmt.Fprintf(os.Stderr, "boxcar nup: unknown preset %q\n", *preset)
 		return 1
 	}
+	threshold, err := parseSize(*largeThreshold)
+	if err != nil || threshold < 1 {
+		fmt.Fprintf(os.Stderr, "boxcar nup: invalid --large-file-threshold %q\n", *largeThreshold)
+		return 1
+	}
 	largeRawVal := *largeRaw && !*noLargeRaw
 	latestVal := *latestSnapshot && !*noLatestSnapshot
 	verifyVal := *verify && !*noVerify
 
 	ctx := context.Background()
-	opts := nup.PackOptions{Level: level, LargeRaw: largeRawVal, Verify: verifyVal, Progress: progress()}
+	opts := nup.PackOptions{Level: level, LargeRaw: largeRawVal, LargeFileThreshold: threshold,
+		MinSavings: *minSavings, Verify: verifyVal, Progress: progress()}
 
 	var result any
 	code := 0
