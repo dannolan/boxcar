@@ -10,32 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/dannolan/boxcar/internal/binfmt"
 	"github.com/dannolan/boxcar/internal/diskfree"
 	"github.com/klauspost/compress/zstd"
 )
-
-type fileNode struct {
-	nameOff, nameLen int
-	source           *Source
-	off              int64
-	stored           int64
-	digest           [32]byte
-	codec            int
-}
-
-type dirNode struct {
-	nameOff, nameLen int
-	first, count     int
-}
-
-type childEntry struct {
-	isDir bool
-	index int
-}
 
 type fpKey struct {
 	size  int64
@@ -82,93 +62,9 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 		return res, err
 	}
 
-	// Tree construction + name interning (mirrors pack's nested dicts).
-	var dirs []dirNode
-	var files []fileNode
-	var children []childEntry
-	var roots []int
-	pool := []byte{}
-	names := map[string]int{}
-	intern := func(name string) (int, int) {
-		data := []byte(name)
-		key := string(data)
-		if off, ok := names[key]; ok {
-			return off, len(data)
-		}
-		off := len(pool)
-		names[key] = off
-		pool = append(pool, data...)
-		return off, len(data)
-	}
-
-	for pi := range packages {
-		p := &packages[pi]
-		tree := map[string]any{}
-		dirList := append([]string(nil), p.Directories...)
-		sort.Strings(dirList)
-		for _, path := range dirList {
-			branch := tree
-			for _, name := range pathParts(path) {
-				next, ok := branch[name].(map[string]any)
-				if !ok {
-					next = map[string]any{}
-					branch[name] = next
-				}
-				branch = next
-			}
-		}
-		for path, source := range p.Files {
-			parts := pathParts(path)
-			branch := tree
-			for _, name := range parts[:len(parts)-1] {
-				if _, isFile := branch[name].(*Source); isFile {
-					binfmt.Fail("File/directory collision.")
-				}
-				next, ok := branch[name].(map[string]any)
-				if !ok {
-					next = map[string]any{}
-					branch[name] = next
-				}
-				branch = next
-			}
-			last := parts[len(parts)-1]
-			binfmt.Require(branch[last] == nil, "Duplicate file/directory path.")
-			branch[last] = source
-		}
-
-		var visit func(branch map[string]any, name string, depth int) int
-		visit = func(branch map[string]any, name string, depth int) int {
-			binfmt.Check(ctx)
-			binfmt.Require(depth < 256, "Directory nesting exceeds 255 levels.")
-			index := len(dirs)
-			dirs = append(dirs, dirNode{})
-			start := len(children)
-			namesSorted := sortedKeys(branch)
-			children = append(children, make([]childEntry, len(namesSorted))...)
-			for j, n := range namesSorted {
-				value := branch[n]
-				if sub, ok := value.(map[string]any); ok {
-					children[start+j] = childEntry{isDir: true, index: visit(sub, n, depth+1)}
-				} else {
-					src := value.(*Source)
-					children[start+j] = childEntry{isDir: false, index: len(files)}
-					no, nl := intern(n)
-					files = append(files, fileNode{nameOff: no, nameLen: nl, source: src})
-				}
-			}
-			no, nl := intern(name)
-			dirs[index] = dirNode{nameOff: no, nameLen: nl, first: start, count: len(namesSorted)}
-			return index
-		}
-		roots = append(roots, visit(tree, "", 0))
-	}
-
-	binfmt.Require(len(dirs)+len(files) < int(none), "Too many NUP nodes.")
-
-	pooloff := 48 + len(packages)*64 + len(dirs)*24 + len(files)*80 + len(children)*4
-	tocsize := binfmt.Align(int64(pooloff+len(pool)), 16)
-	binfmt.Require(tocsize <= 256*1024*1024, "NUP file table exceeds 256 MiB.")
-	bloboff := binfmt.Align(128+tocsize, 16)
+	l := planLayout(ctx, packages)
+	files := l.files
+	bloboff := l.bloboff
 
 	var total int64
 	for _, f := range files {
@@ -252,7 +148,6 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 	}
 
 	// Metadata extents.
-	type metaExtent struct{ off, size int64 }
 	meta := make([]metaExtent, len(packages))
 	for i := range packages {
 		p := &packages[i]
@@ -269,94 +164,8 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 
 	end, _ := out.Seek(0, io.SeekCurrent)
 
-	// TOC assembly.
-	toc := make([]byte, tocsize)
-	copy(toc[0:4], "TOC\x01")
-	binfmt.PutU32(toc, 4, uint32(len(packages)))
-	binfmt.PutU64(toc, 8, uint64(len(dirs)))
-	binfmt.PutU64(toc, 16, uint64(len(files)))
-	binfmt.PutU64(toc, 24, uint64(pooloff))
-	binfmt.PutU64(toc, 32, uint64(len(pool)))
-	at := 48
-	for pi := range packages {
-		p := &packages[pi]
-		root := roots[pi]
-		exefs := none
-		romfs := none
-		for _, target := range [2]string{"exefs", "romfs"} {
-			d := dirs[root]
-			for _, ch := range children[d.first : d.first+d.count] {
-				if !ch.isDir {
-					continue
-				}
-				cd := dirs[ch.index]
-				wantOff, wantLen := internedName(names, target)
-				if cd.nameOff == wantOff && cd.nameLen == wantLen {
-					if target == "exefs" {
-						exefs = uint32(ch.index)
-					} else {
-						romfs = uint32(ch.index)
-					}
-				}
-			}
-		}
-		binfmt.PutU64(toc, at+0, p.TitleID)
-		binfmt.PutU32(toc, at+8, uint32(root))
-		binfmt.PutU32(toc, at+12, exefs)
-		binfmt.PutU32(toc, at+16, romfs)
-		binfmt.PutU32(toc, at+20, p.Version)
-		toc[at+24] = byte(p.Kind)
-		toc[at+25] = byte(p.Flags)
-		binfmt.PutU64(toc, at+32, uint64(meta[pi].off))
-		binfmt.PutU32(toc, at+40, uint32(meta[pi].size))
-		at += 64
-	}
-	for _, d := range dirs {
-		binfmt.PutU32(toc, at+0, uint32(d.nameOff))
-		binfmt.PutU32(toc, at+4, uint32(d.nameLen))
-		binfmt.PutU32(toc, at+8, uint32(d.first))
-		binfmt.PutU32(toc, at+12, uint32(d.count))
-		at += 24
-	}
-	for _, f := range files {
-		binfmt.PutU32(toc, at+0, uint32(f.nameOff))
-		binfmt.PutU32(toc, at+4, uint32(f.nameLen))
-		binfmt.PutU64(toc, at+8, uint64(f.source.size))
-		binfmt.PutU64(toc, at+16, uint64(f.off))
-		binfmt.PutU64(toc, at+24, uint64(f.stored))
-		copy(toc[at+32:at+64], f.digest[:])
-		toc[at+64] = byte(f.codec)
-		at += 80
-	}
-	for _, ch := range children {
-		node := uint32(ch.index)
-		if !ch.isDir {
-			node += uint32(len(dirs))
-		}
-		binfmt.PutU32(toc, at, node)
-		at += 4
-	}
-	copy(toc[pooloff:pooloff+len(pool)], pool)
-
-	// Identity + superblock.
-	identityBuf := make([]byte, 0, len(packages)*13)
-	for _, p := range packages {
-		identityBuf = binfmt.AppendU64(identityBuf, p.TitleID)
-		identityBuf = binfmt.AppendU32(identityBuf, p.Version)
-		identityBuf = append(identityBuf, byte(p.Kind))
-	}
-	identityHash := binfmt.SHA256Sum(identityBuf)
-	header := make([]byte, 128)
-	copy(header[0:4], "NUP\x01")
-	binfmt.PutU16(header, 4, 128)
-	binfmt.PutU16(header, 6, 1)
-	binfmt.PutU64(header, 8, 128)
-	binfmt.PutU64(header, 16, uint64(tocsize))
-	copy(header[24:56], binfmt.SHA256Sum(toc))
-	binfmt.PutU64(header, 56, uint64(bloboff))
-	binfmt.PutU64(header, 64, uint64(end))
-	binfmt.PutU32(header, 72, uint32(len(packages)))
-	copy(header[80:96], identityHash[:16])
+	toc := l.toc(packages, meta)
+	header := superblock(packages, toc, bloboff, end)
 
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return res, err
@@ -415,15 +224,6 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 		Packages:              len(packages),
 		DuplicateFilesSkipped: duplicateFiles,
 	}, nil
-}
-
-// internedName returns the interned offset (or -1) and length of name.
-func internedName(names map[string]int, name string) (int, int) {
-	off, ok := names[name]
-	if !ok {
-		off = -1
-	}
-	return off, len(name)
 }
 
 func writeZeros(out *os.File, n int64) error {
