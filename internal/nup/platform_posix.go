@@ -9,15 +9,21 @@ import (
 )
 
 // commitNew moves temporary onto output without overwriting an existing
-// file. It is commitFile, except that on filesystems without hard links
-// (exFAT and FAT32 SD cards) output is first claimed with O_EXCL and the
-// claim is then atomically replaced by rename(2).
+// file, like commitFile. On filesystems without hard links (exFAT and FAT32
+// SD cards) output is first claimed with O_EXCL and the claim is then
+// atomically replaced by rename(2). Once output is linked the commit has
+// happened; failing to drop the temporary name only leaves clutter.
 func commitNew(temporary, output string) error {
-	err := commitFile(temporary, output)
-	if err == nil || errors.Is(err, fs.ErrExist) {
+	err := os.Link(temporary, output)
+	switch {
+	case err == nil:
+		_ = os.Remove(temporary)
+		return nil
+	case errors.Is(err, fs.ErrExist):
 		return err
+	default:
+		return claimAndRename(temporary, output)
 	}
-	return claimAndRename(temporary, output)
 }
 
 func claimAndRename(temporary, output string) error {
