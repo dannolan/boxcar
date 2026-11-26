@@ -64,6 +64,9 @@ type Archive struct {
 	headerSize, headerVersion int
 	records                   [][3]uint32 // root, exefs, romfs per package
 	metaRaw                   [][]byte    // metadata blocks as stored
+
+	// Tolerated deviations (ARCHITECTURE.md § Deviations 7 and 8).
+	metaBeforeBlob, emptyOffsets int
 }
 
 // Open parses a NUP archive (port of nup_format.Archive.__init__).
@@ -102,6 +105,22 @@ func (a *Archive) Close() error {
 
 // Packages returns the parsed package set.
 func (a *Archive) Packages() []Package { return a.packages }
+
+// Deviations describes what this archive does that Boxcar accepts but the
+// NUP spec or the reference reader does not; empty for compliant archives.
+// Rewriting the archive (Pack, Optimize) removes them.
+func (a *Archive) Deviations() []string {
+	var out []string
+	if a.emptyOffsets > 0 {
+		out = append(out, fmt.Sprintf("%d empty file(s) have a nonzero extent offset (written by KaiDump); "+
+			"the NUP spec requires 0 and strict readers reject the archive", a.emptyOffsets))
+	}
+	if a.metaBeforeBlob > 0 {
+		out = append(out, fmt.Sprintf("metadata of %d package(s) lies before the blob region, "+
+			"which the NSP-Box reader rejects", a.metaBeforeBlob))
+	}
+	return out
+}
 
 func (a *Archive) readAt(off, size int64) []byte {
 	binfmt.Require(off >= 0 && off <= a.stamp.size && size >= 0 && size <= a.stamp.size-off, "Archive offset is out of bounds.")
@@ -229,6 +248,9 @@ func (a *Archive) parse(ctx context.Context) {
 			// metadata in the TOC-to-blob gap (observed in the wild); we
 			// accept them. Documented deviation — see ARCHITECTURE.md.
 			binfmt.Require(mo <= uint64(fs) && ms <= uint64(fs)-mo, "Invalid package metadata bounds.")
+			if mo < uint64(bo) {
+				a.metaBeforeBlob++
+			}
 			regions = append(regions, [2]int64{int64(mo), int64(mo) + int64(ms)})
 			var err error
 			raw = a.readAt(int64(mo), int64(ms))
@@ -294,6 +316,9 @@ func (a *Archive) parse(ctx context.Context) {
 			// cursor as an empty file's offset; nothing is read from it, so
 			// any offset is accepted. Documented deviation — see ARCHITECTURE.md.
 			binfmt.Require(stored == 0 && codec == 0, "Invalid empty-file extent.")
+			if off != 0 {
+				a.emptyOffsets++
+			}
 		} else {
 			binfmt.Require(uint64(bo) <= off && off%16 == 0 && stored > 0 && off <= uint64(fs) && stored <= uint64(fs)-off,
 				"File extent out of bounds.")

@@ -215,6 +215,10 @@ func (p *progressPrinter) finished(index, count int, r nuptools.ArchiveResult) {
 		}
 		p.println(fmt.Sprintf("%s optimized %s; %s\n    verified; logical SHA-256 %s -> %s", head, change(r.SizeBefore, r.SizeAfter), where,
 			short(r.LogicalSHA256), short(r.OutputLogicalSHA256)))
+		for _, d := range r.Plan.Deviations {
+			p.println("    normalized: " + d)
+		}
+		return
 	case "planned":
 		verdict := "would optimize"
 		if r.Action == "skip" {
@@ -226,6 +230,9 @@ func (p *progressPrinter) finished(index, count int, r nuptools.ArchiveResult) {
 		p.println(fmt.Sprintf("%s skipped: %s", head, r.Reason))
 	default:
 		p.println(fmt.Sprintf("%s FAILED: %s", head, r.Error))
+	}
+	for _, d := range r.Plan.Deviations {
+		p.println("    note: " + d)
 	}
 }
 

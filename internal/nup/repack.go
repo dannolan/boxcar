@@ -93,6 +93,10 @@ type Plan struct {
 	// PolicyFixes counts zstd extents that break the storage policy: above
 	// the large-file threshold, or saving less than the minimum.
 	PolicyFixes int `json:"policy_fixes"`
+	// Deviations lists what the source does that the NUP spec or the
+	// reference reader does not allow (see Archive.Deviations); a rewrite
+	// normalizes them.
+	Deviations []string `json:"deviations,omitempty"`
 	// EstimatedSize is the predicted output size. Exact reports whether
 	// every file planned for compression was trial-compressed in full
 	// rather than sampled.
@@ -331,7 +335,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 
 	binfmt.Check(ctx)
 	if opts.InPlace {
-		if res.SizeAfter >= res.SizeBefore && !res.ContentChanged && res.Plan.PolicyFixes == 0 && !opts.Force {
+		if res.SizeAfter >= res.SizeBefore && !res.ContentChanged && res.Plan.PolicyFixes == 0 && len(res.Plan.Deviations) == 0 && !opts.Force {
 			reason := fmt.Sprintf("no savings after optimization (the rewrite was %d bytes); the original was kept", res.SizeAfter)
 			return skipped(res, reason, report), nil
 		}
@@ -396,8 +400,11 @@ func (p Plan) verdict(minGain float64, changed, recompress bool) (string, bool) 
 	}
 	percent := 100 * float64(p.EstimatedSavings) / float64(max64(p.ArchiveSize, 1))
 	need := int64(math.Ceil(float64(p.ArchiveSize) * minGain / 100))
-	if p.EstimatedSavings >= max64(need, 1) {
+	switch {
+	case p.EstimatedSavings >= max64(need, 1):
 		return fmt.Sprintf("estimated savings %.1f%% reach the %g%% minimum gain", percent, minGain), true
+	case len(p.Deviations) > 0:
+		return fmt.Sprintf("the archive deviates from the NUP spec and will be normalized (estimated savings %.1f%%)", math.Max(percent, 0)), true
 	}
 	return fmt.Sprintf("already optimized: estimated savings %.1f%% are below the %g%% minimum gain", math.Max(percent, 0), minGain), false
 }
@@ -411,6 +418,7 @@ func planRepack(ctx context.Context, a *Archive, packages []Package, level int, 
 	p.ArchiveSize = a.stamp.size
 	p.Packages = len(packages)
 	p.Files = len(r.l.files)
+	p.Deviations = a.Deviations()
 	writers := map[seenKey]int{}
 	covered := map[extentKey]bool{}
 	for i, f := range r.l.files {

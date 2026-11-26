@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -447,6 +448,88 @@ func TestOptimizeEstimateIgnoresSamplingNoise(t *testing.T) {
 	if real := optimizeT(t, in, opts); real.Stats.Compressed != 0 {
 		t.Errorf("fixture files should not compress: %+v", real.Stats)
 	}
+}
+
+// TestOptimizeNormalizesDeviations: an archive the reference reader rejects
+// is rewritten even when it would not shrink, and the rewrite is clean.
+func TestOptimizeNormalizesDeviations(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "deviating.nup")
+	noise := make([]byte, 300<<10)
+	rand.New(rand.NewSource(5)).Read(noise)
+	pkgs := []nuptest.Package{{TitleID: testTID, Kind: 0, Files: []nuptest.File{
+		{Path: "romfs/a.bin", Data: noise},
+		{Path: "romfs/empty"},
+		{Path: "romfs/z.bin", Data: noise[:1000]},
+	}}}
+	if err := nuptest.WriteKaiDump(in, pkgs, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	a := openT(t, in)
+	if d := a.Deviations(); len(d) != 1 || !strings.Contains(d[0], "1 empty file(s) have a nonzero extent offset") {
+		t.Fatalf("Deviations = %q", d)
+	}
+	opts := defaultOptions()
+	opts.InPlace = true
+	opts.DryRun = true
+	res := optimizeT(t, in, opts)
+	if res.Action != "optimize" || !strings.Contains(res.Reason, "deviates from the NUP spec") || len(res.Plan.Deviations) != 1 {
+		t.Fatalf("dry run = %+v", res)
+	}
+	opts.DryRun = false
+	if res = optimizeT(t, in, opts); res.Status != "optimized" {
+		t.Fatalf("result = %+v", res)
+	}
+	if d := openT(t, in).Deviations(); len(d) != 0 {
+		t.Errorf("rewrite still deviates: %q", d)
+	}
+	if res = optimizeT(t, in, opts); res.Status != "skipped" {
+		t.Errorf("normalized archive should be skipped: %+v", res)
+	}
+}
+
+// TestDeviationsReportMetadataBeforeBlob places a metadata block in the gap
+// between the TOC and the blob region, as some third-party packers do.
+func TestDeviationsReportMetadataBeforeBlob(t *testing.T) {
+	dir := t.TempDir()
+	meta := nuptest.TLV(8, []byte("x"))
+	for pad := 1; pad <= 16; pad++ {
+		path := filepath.Join(dir, fmt.Sprintf("gap%d.nup", pad))
+		pkgs := []nuptest.Package{{TitleID: testTID, Kind: 0, Meta: meta,
+			Files: []nuptest.File{{Path: "romfs/a.bin", Data: []byte("data")}},
+			Dirs:  []string{"romfs/" + strings.Repeat("p", pad)}}}
+		if err := nuptest.WriteKaiDump(path, pkgs, nuptest.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tocEnd := 128 + int(binary.LittleEndian.Uint64(data[16:24]))
+		blob := int(binary.LittleEndian.Uint64(data[56:64]))
+		if blob-tocEnd < len(meta) {
+			continue
+		}
+		copy(data[tocEnd:], meta)
+		data = mutateTOC(t, data, func(toc []byte) {
+			binary.LittleEndian.PutUint64(toc[48+32:], uint64(tocEnd))
+		})
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d := openT(t, path).Deviations()
+		if len(d) != 1 || !strings.Contains(d[0], "lies before the blob region") {
+			t.Fatalf("Deviations = %q", d)
+		}
+		opts := defaultOptions()
+		opts.Output = filepath.Join(dir, "out.nup")
+		optimizeT(t, path, opts)
+		if d := openT(t, opts.Output).Deviations(); len(d) != 0 {
+			t.Errorf("rewrite still deviates: %q", d)
+		}
+		return
+	}
+	t.Fatal("no layout left room for metadata before the blob region")
 }
 
 // TestOptimizeLargeArchiveBoundedMemory optimizes a 96 MiB file: the plan

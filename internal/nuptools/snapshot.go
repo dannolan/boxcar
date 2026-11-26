@@ -364,6 +364,9 @@ func InspectNup(ctx context.Context, path string, verify bool, progress binfmt.P
 	result["verified"] = verify
 	result["output"] = path
 	result["size"] = result["archive_size"]
+	if notes := a.Deviations(); len(notes) > 0 {
+		result["notes"] = notes
+	}
 	return result, nil
 }
 

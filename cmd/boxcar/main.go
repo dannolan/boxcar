@@ -323,6 +323,11 @@ func runNup(args []string) int {
 			code = 1
 		} else {
 			result = r
+			if notes, ok := r["notes"].([]string); ok {
+				for _, n := range notes {
+					fmt.Fprintf(os.Stderr, "note: %s; 'boxcar optimize' writes a compliant copy\n", n)
+				}
+			}
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "boxcar nup: unknown operation %q\n", *op)
