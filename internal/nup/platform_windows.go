@@ -3,6 +3,7 @@
 package nup
 
 import (
+	"errors"
 	"os"
 	"syscall"
 
@@ -36,6 +37,32 @@ func commitFile(temporary, output string) error {
 	}
 	return windows.MoveFileEx(from, to, 0)
 }
+
+// replaceable reports why a file cannot be replaced in place: MoveFileEx
+// refuses to replace a read-only file.
+func replaceable(st os.FileInfo) error {
+	if st.Mode().Perm()&0o200 == 0 {
+		return errors.New("The NUP is read-only; make it writable to optimize it in place.")
+	}
+	return nil
+}
+
+// replaceFile swaps temporary over an existing output with one MoveFileEx
+// call, so output is always either the old or the new complete file.
+func replaceFile(temporary, output string, _ os.FileMode) error {
+	from, err := windows.UTF16PtrFromString(temporary)
+	if err != nil {
+		return err
+	}
+	to, err := windows.UTF16PtrFromString(output)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+// syncDir is a no-op: MOVEFILE_WRITE_THROUGH already flushed the rename.
+func syncDir(string) {}
 
 // isLinked reports whether path is a symlink or reparse point.
 func isLinked(path string) bool {

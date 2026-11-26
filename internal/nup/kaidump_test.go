@@ -22,6 +22,8 @@ func kaiDumpPackages() ([]nuptest.Package, map[string][]byte) {
 	odd := []byte("odd-sized")
 	meta := append(nuptest.TLV(1, npdm), nuptest.TLV(5, []byte("Kai Game"))...)
 	meta = append(meta, nuptest.TLV(8, []byte("KaiDump"))...)
+	meta = append(meta, nuptest.TLV(0, []byte("a55uka numbers TLVs from 0"))...)
+	meta = append(meta, nuptest.TLV(0x8001, []byte{0xde, 0xad, 0xbe, 0xef})...)
 	base := nuptest.Package{
 		TitleID: tid, Version: 0x20000, Kind: 0,
 		Files: []nuptest.File{
