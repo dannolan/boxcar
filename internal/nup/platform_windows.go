@@ -38,6 +38,10 @@ func commitFile(temporary, output string) error {
 	return windows.MoveFileEx(from, to, 0)
 }
 
+// commitNew is commitFile: MoveFileEx needs no hard links, so it also
+// works on exFAT and FAT32 volumes.
+func commitNew(temporary, output string) error { return commitFile(temporary, output) }
+
 // replaceable reports why a file cannot be replaced in place: MoveFileEx
 // refuses to replace a read-only file.
 func replaceable(st os.FileInfo) error {

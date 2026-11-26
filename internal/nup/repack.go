@@ -333,7 +333,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 		if err := replaceSource(abs, temp, a.stamp); err != nil {
 			return res, err
 		}
-	} else if err := commitFile(temp, final); err != nil {
+	} else if err := commitNew(temp, final); err != nil {
 		return res, err
 	}
 	syncDir(filepath.Dir(final))
