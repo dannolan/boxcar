@@ -238,6 +238,36 @@ func TestOptimizeBatchOutputs(t *testing.T) {
 	}
 }
 
+// TestOptimizeBatchSkipsOwnOutputFolder: an output folder inside the
+// searched folder is not searched, so earlier outputs never become inputs.
+func TestOptimizeBatchSkipsOwnOutputFolder(t *testing.T) {
+	lib := library(t)
+	opts := batchOptions()
+	opts.Recursive = true
+	opts.Output = filepath.Join(lib, "out")
+	if _, err := Optimize(context.Background(), []string{lib}, opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(lib, "out", "sub", "c.nup")); err != nil {
+		t.Fatalf("first run did not write into out/: %v", err)
+	}
+	for _, dryRun := range []bool{true, false} {
+		opts.DryRun = dryRun
+		res, err := Optimize(context.Background(), []string{lib}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range res.Archives {
+			if strings.Contains(a.Input, string(filepath.Separator)+"out"+string(filepath.Separator)) {
+				t.Errorf("dry run %v picked up an output: %s", dryRun, a.Input)
+			}
+		}
+		if res.Summary.Archives != 5 {
+			t.Errorf("dry run %v: %d archives, want the 5 originals", dryRun, res.Summary.Archives)
+		}
+	}
+}
+
 func TestOptimizeBatchArguments(t *testing.T) {
 	lib := library(t)
 	empty := t.TempDir()

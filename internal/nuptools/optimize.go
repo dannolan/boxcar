@@ -92,7 +92,13 @@ type optimizeTarget struct {
 // unusable arguments.
 func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (BatchResult, error) {
 	result := BatchResult{DryRun: opts.DryRun, InPlace: opts.InPlace && !opts.DryRun}
-	targets, err := findArchives(inputs, opts.Recursive)
+	var outputDir string
+	if opts.Output != "" && !opts.InPlace && !strings.EqualFold(filepath.Ext(opts.Output), ".nup") {
+		if abs, err := filepath.Abs(opts.Output); err == nil {
+			outputDir = abs
+		}
+	}
+	targets, err := findArchives(inputs, opts.Recursive, outputDir)
 	if err != nil {
 		return result, err
 	}
@@ -217,10 +223,11 @@ func failed(path string, err error) ArchiveResult {
 	return r
 }
 
-// findArchives expands inputs into archive targets. Problems with a single
-// entry (missing, linked) become failed targets; finding nothing at all is
-// an error.
-func findArchives(inputs []string, recursive bool) ([]optimizeTarget, error) {
+// findArchives expands inputs into archive targets, skipping the output
+// folder when it lies inside a searched folder. Problems with a single entry
+// (missing, linked) become failed targets; finding nothing at all is an
+// error.
+func findArchives(inputs []string, recursive bool, outputDir string) ([]optimizeTarget, error) {
 	if len(inputs) == 0 {
 		return nil, errors.New("Choose at least one .nup file or folder.")
 	}
@@ -268,6 +275,9 @@ func findArchives(inputs []string, recursive bool) ([]optimizeTarget, error) {
 					}
 					return nil
 				}
+				if d.IsDir() && p != abs && outputDir != "" && sameDir(p, outputDir) {
+					return fs.SkipDir
+				}
 				if d.IsDir() && p != abs && isNup(d.Name()) {
 					add(p, rel, splitErr)
 					return fs.SkipDir
@@ -309,6 +319,15 @@ func findArchives(inputs []string, recursive bool) ([]optimizeTarget, error) {
 		return nil, errors.New("No .nup archives found.")
 	}
 	return targets, nil
+}
+
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	sa, err1 := os.Stat(a)
+	sb, err2 := os.Stat(b)
+	return err1 == nil && err2 == nil && os.SameFile(sa, sb)
 }
 
 // assignOutputs maps each target to its output path.
