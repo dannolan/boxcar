@@ -388,6 +388,67 @@ func (s *textStream) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// randomStream generates incompressible bytes, optionally with a run of
+// zeros at [zeroAt, zeroAt+zeroLen).
+type randomStream struct {
+	rng             *rand.Rand
+	left            int64
+	zeroAt, zeroLen int64
+	at              int64
+}
+
+func (s *randomStream) Read(p []byte) (int, error) {
+	if s.left == 0 {
+		return 0, io.EOF
+	}
+	n := int(min(int64(len(p)), s.left))
+	s.rng.Read(p[:n])
+	for i := 0; i < n; i++ {
+		if pos := s.at + int64(i); pos >= s.zeroAt && pos < s.zeroAt+s.zeroLen {
+			p[i] = 0
+		}
+	}
+	s.at += int64(n)
+	s.left -= int64(n)
+	return n, nil
+}
+
+// TestOptimizeEstimateIgnoresSamplingNoise: files that cannot be compressed
+// must not show phantom savings. Each file hides 4 KiB of zeros across a
+// 128 KiB zstd block boundary, so no block of the whole file saves enough to
+// be compressed, while a sample window starting elsewhere holds the run in
+// one block and compresses a little.
+func TestOptimizeEstimateIgnoresSamplingNoise(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large archive")
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "incompressible.nup")
+	var files []nuptest.File
+	for i := 0; i < 200; i++ {
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/media/%03d.bin", i), Size: 512 << 10,
+			Source: &randomStream{rng: rand.New(rand.NewSource(int64(i))), left: 512 << 10, zeroAt: 254 << 10, zeroLen: 4 << 10}})
+	}
+	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	opts := defaultOptions()
+	opts.DryRun = true
+	res := optimizeT(t, in, opts)
+	if res.Plan.Exact || res.Plan.EstimatedSavings > res.Plan.ArchiveSize-res.Plan.EstimatedSize || res.Action != "skip" {
+		t.Fatalf("result = %+v", res)
+	}
+	if !strings.Contains(res.Reason, "estimated savings 0.0%") || res.Plan.EstimatedSavings > 0 {
+		t.Errorf("phantom savings: %d bytes, %q", res.Plan.EstimatedSavings, res.Reason)
+	}
+	opts.DryRun = false
+	opts.Force = true
+	opts.Output = filepath.Join(dir, "out.nup")
+	if real := optimizeT(t, in, opts); real.Stats.Compressed != 0 {
+		t.Errorf("fixture files should not compress: %+v", real.Stats)
+	}
+}
+
 // TestOptimizeLargeArchiveBoundedMemory optimizes a 96 MiB file: the plan
 // must fall back to sampling, and the heap must stay far below the file size
 // because extents are streamed through fixed buffers.
@@ -439,17 +500,19 @@ func TestOptimizeLargeArchiveBoundedMemory(t *testing.T) {
 // of their own; they must be estimated from other .txt samples, not from an
 // average dragged down by incompressible video.
 func TestOptimizeEstimateStratified(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large archive")
+	}
 	dir := t.TempDir()
 	in := filepath.Join(dir, "mixed.nup")
 	var files []nuptest.File
-	for i := 0; i < 400; i++ {
-		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/text/%03d.txt", i), Size: 50 << 10,
-			Source: &textStream{rng: rand.New(rand.NewSource(int64(i))), left: 50 << 10}})
+	for i := 0; i < 500; i++ {
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/text/%03d.txt", i), Size: 60 << 10,
+			Source: &textStream{rng: rand.New(rand.NewSource(int64(i))), left: 60 << 10}})
 	}
 	for i := 0; i < 2; i++ {
-		video := make([]byte, 12<<20)
-		rand.New(rand.NewSource(int64(100 + i))).Read(video)
-		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/movie/%d.bk2", i), Data: video})
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/movie/%d.bk2", i), Size: 40 << 20,
+			Source: &randomStream{rng: rand.New(rand.NewSource(int64(100 + i))), left: 40 << 20}})
 	}
 	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
 		t.Fatal(err)

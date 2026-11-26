@@ -21,10 +21,15 @@ import (
 
 // Estimation budget: archives whose compression candidates fit in
 // sampleBudget bytes are trial-compressed in full; larger ones are sampled in
-// sampleWindow pieces spread evenly over the candidates' bytes.
+// sampleWindow pieces spread evenly over the candidates' bytes. Windows start
+// on the 128 KiB grid on which a streamed file is cut into zstd blocks, so a
+// sample compresses exactly the blocks the real run will (minus the history
+// before them): unaligned windows straddle different block boundaries and
+// report savings the file can never get.
 const (
-	sampleBudget = 32 << 20
-	sampleWindow = 128 << 10
+	sampleBudget = 64 << 20
+	sampleWindow = 256 << 10
+	zstdBlock    = 128 << 10
 )
 
 var emptyDigest = sha256.Sum256(nil)
@@ -394,7 +399,7 @@ func (p Plan) verdict(minGain float64, changed, recompress bool) (string, bool) 
 	if p.EstimatedSavings >= max64(need, 1) {
 		return fmt.Sprintf("estimated savings %.1f%% reach the %g%% minimum gain", percent, minGain), true
 	}
-	return fmt.Sprintf("already optimized: estimated savings %.2f%% are below the %g%% minimum gain", math.Max(percent, 0), minGain), false
+	return fmt.Sprintf("already optimized: estimated savings %.1f%% are below the %g%% minimum gain", math.Max(percent, 0), minGain), false
 }
 
 // planRepack lays out the package set like Pack and decides how each distinct
@@ -551,7 +556,7 @@ func (r *repacking) estimateCompression() {
 		rec := r.a.files[r.nodes[i].rec]
 		length := min64(sampleWindow, rec.size)
 		start := point - prefix[j] - length/2
-		start = max64(0, min64(start, rec.size-length))
+		start = max64(0, min64(start, rec.size-length)) / zstdBlock * zstdBlock
 		if seen[[2]int64{int64(i), start}] {
 			continue
 		}
