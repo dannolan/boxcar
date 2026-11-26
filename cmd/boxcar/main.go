@@ -44,6 +44,8 @@ func run(args []string) int {
 		return runDLC(args[1:])
 	case "nup":
 		return runNup(args[1:])
+	case "optimize":
+		return runOptimize(args[1:])
 	case "patch":
 		return runPatch(args[1:])
 	case "keys":
@@ -56,7 +58,7 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: boxcar <build|dlc|nup|patch|keys> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: boxcar <build|dlc|nup|optimize|patch|keys> [flags]")
 	fmt.Fprintln(os.Stderr, "       boxcar -version")
 }
 
@@ -226,6 +228,9 @@ func runDLC(args []string) int {
 }
 
 func runNup(args []string) int {
+	if nupOperation(args) == "optimize" {
+		return runOptimize(args)
+	}
 	fs := flag.NewFlagSet("nup", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	op := fs.String("nup-operation", "", "")

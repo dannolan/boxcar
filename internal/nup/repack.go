@@ -114,11 +114,13 @@ type RepackStats struct {
 }
 
 // OptimizeResult reports one Optimize call. Status is "optimized" (written
-// and committed), "skipped" (left alone; see Reason) or "planned" (dry run).
+// and committed), "skipped" (left alone; see Reason) or "planned" (dry run,
+// with Action "optimize" or "skip" saying what a real run would do).
 type OptimizeResult struct {
 	Input               string       `json:"input"`
 	Output              string       `json:"output,omitempty"`
 	Status              string       `json:"status"`
+	Action              string       `json:"action,omitempty"`
 	Reason              string       `json:"reason,omitempty"`
 	InPlace             bool         `json:"in_place"`
 	SizeBefore          int64        `json:"size_before"`
@@ -234,6 +236,10 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	res.Reason = reason
 	if opts.DryRun {
 		res.Status = "planned"
+		res.Action = "skip"
+		if worthwhile || opts.Force {
+			res.Action = "optimize"
+		}
 		res.SizeAfter = r.plan.EstimatedSize
 		res.SavedBytes = r.plan.EstimatedSavings
 		report("NUP optimization planned", 100)
@@ -384,7 +390,7 @@ func (p Plan) verdict(minGain float64, changed, recompress bool) (string, bool) 
 	percent := 100 * float64(p.EstimatedSavings) / float64(max64(p.ArchiveSize, 1))
 	need := int64(math.Ceil(float64(p.ArchiveSize) * minGain / 100))
 	if p.EstimatedSavings >= max64(need, 1) {
-		return fmt.Sprintf("estimated savings %d bytes (%.1f%%)", p.EstimatedSavings, percent), true
+		return fmt.Sprintf("estimated savings %.1f%% reach the %g%% minimum gain", percent, minGain), true
 	}
 	return fmt.Sprintf("already optimized: estimated savings %.2f%% are below the %g%% minimum gain", math.Max(percent, 0), minGain), false
 }
