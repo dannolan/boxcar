@@ -281,7 +281,10 @@ func (a *Archive) parse(ctx context.Context) {
 
 		binfmt.Require((codec == 0 || codec == 1) && cf == 0 && r == 0 && allZero(r3), "Unknown codec or file flags.")
 		if size == 0 {
-			binfmt.Require(off == 0 && stored == 0 && codec == 0, "Invalid empty-file extent.")
+			// The reference also requires off == 0. KaiDump records the blob
+			// cursor as an empty file's offset; nothing is read from it, so
+			// any offset is accepted. Documented deviation — see ARCHITECTURE.md.
+			binfmt.Require(stored == 0 && codec == 0, "Invalid empty-file extent.")
 		} else {
 			binfmt.Require(uint64(bo) <= off && off%16 == 0 && stored > 0 && off <= uint64(fs) && stored <= uint64(fs)-off,
 				"File extent out of bounds.")

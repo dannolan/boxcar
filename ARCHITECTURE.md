@@ -200,6 +200,14 @@ every push with a pinned reference checkout.
    accepts metadata anywhere in the file as long as it is in-bounds and does
    not overlap other extents (the overlap pass already enforces that).
    Regression test: `internal/nup/archive_reloc_test.go`.
+8. **NUP empty-file offsets**: the reference reader (and SPEC §3.6) requires
+   a zero-length file to have `extent_offset == 0`. KaiDump records the
+   current blob cursor there instead, so its archives are rejected whenever
+   the dump contains an empty file. Boxcar still requires `extent_size == 0`
+   and `codec == 0` but ignores the offset, which is never read. Boxcar's
+   writers (pack, optimize) always emit 0, so optimizing a KaiDump archive
+   also makes it readable by strict readers.
+   Regression test: `internal/nup/kaidump_test.go`.
 
 ## Dependency policy
 

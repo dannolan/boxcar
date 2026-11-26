@@ -7,6 +7,9 @@
   `blobOff <= metaOff`. Real-world NUPs from other packers were rejected by
   the reference-implementation rule; Boxcar now reads them and verifies every
   extent. Regression-tested; golden cross-validation unaffected.
+- **NUP reader: accept KaiDump empty files.** KaiDump stores the blob cursor
+  as a zero-length file's extent offset; the reader now ignores that offset
+  (size and codec must still be zero) instead of rejecting the archive.
 
 ## 4.0.0-boxcar.1 — 2026-11-08
 
