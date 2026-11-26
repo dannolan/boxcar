@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
@@ -432,6 +433,37 @@ func TestOptimizeLargeArchiveBoundedMemory(t *testing.T) {
 		t.Errorf("peak heap %d MiB while optimizing a %d MiB file", peak>>20, size>>20)
 	}
 	t.Logf("peak heap %d MiB, %d -> %d bytes, estimate %d", peak>>20, res.SizeBefore, res.SizeAfter, res.Plan.EstimatedSize)
+}
+
+// TestOptimizeEstimateStratified: most small text files get no sample window
+// of their own; they must be estimated from other .txt samples, not from an
+// average dragged down by incompressible video.
+func TestOptimizeEstimateStratified(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "mixed.nup")
+	var files []nuptest.File
+	for i := 0; i < 400; i++ {
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/text/%03d.txt", i), Size: 50 << 10,
+			Source: &textStream{rng: rand.New(rand.NewSource(int64(i))), left: 50 << 10}})
+	}
+	for i := 0; i < 2; i++ {
+		video := make([]byte, 12<<20)
+		rand.New(rand.NewSource(int64(100 + i))).Read(video)
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/movie/%d.bk2", i), Data: video})
+	}
+	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	opts := defaultOptions()
+	opts.Output = filepath.Join(dir, "out.nup")
+	res := optimizeT(t, in, opts)
+	if res.Plan.Exact {
+		t.Fatalf("plan should be sampled: %+v", res.Plan)
+	}
+	estimateErr := float64(res.Plan.EstimatedSize-res.SizeAfter) / float64(res.SizeAfter)
+	if estimateErr < -0.1 || estimateErr > 0.1 {
+		t.Errorf("estimate %d vs actual %d (%.1f%%)", res.Plan.EstimatedSize, res.SizeAfter, 100*estimateErr)
+	}
 }
 
 // flipByte flips one byte of path at off.

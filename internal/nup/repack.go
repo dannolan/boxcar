@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"sort"
@@ -518,6 +519,10 @@ func (r *repacking) estimateCompression() {
 		return
 	}
 
+	// Files without a window of their own take the ratio of their extension,
+	// else of their size class (powers of two), else of every sample: game
+	// data compresses consistently per file type, and pre-compressed media
+	// must not drag down the estimate for everything else.
 	r.plan.Exact = false
 	prefix := make([]int64, len(cands)+1)
 	for j, i := range cands {
@@ -525,7 +530,15 @@ func (r *repacking) estimateCompression() {
 	}
 	type tally struct{ raw, packed int64 }
 	per := map[int]*tally{}
+	byExt := map[string]*tally{}
+	byClass := map[int]*tally{}
 	var all tally
+	ext := func(rec fileRecord) string { return strings.ToLower(filepath.Ext(rec.name)) }
+	class := func(rec fileRecord) int { return bits.Len64(uint64(rec.size)) }
+	count := func(m *tally, raw, packed int64) {
+		m.raw += raw
+		m.packed += packed
+	}
 	seen := map[[2]int64]bool{}
 	var packed []byte
 	windows := int64(sampleBudget / sampleWindow)
@@ -544,24 +557,36 @@ func (r *repacking) estimateCompression() {
 		seen[[2]int64{int64(i), start}] = true
 		r.readRaw(rec, start, buf[:length])
 		packed = enc.EncodeAll(buf[:length], packed[:0])
-		t := per[i]
-		if t == nil {
-			t = &tally{}
-			per[i] = t
+		n := int64(len(packed))
+		if per[i] == nil {
+			per[i] = &tally{}
 		}
-		t.raw += length
-		t.packed += int64(len(packed))
-		all.raw += length
-		all.packed += int64(len(packed))
+		if byExt[ext(rec)] == nil {
+			byExt[ext(rec)] = &tally{}
+		}
+		if byClass[class(rec)] == nil {
+			byClass[class(rec)] = &tally{}
+		}
+		count(per[i], length, n)
+		count(byExt[ext(rec)], length, n)
+		count(byClass[class(rec)], length, n)
+		count(&all, length, n)
 		r.progress("Analyzing NUP", 100*float64(s+1)/float64(windows))
 	}
 	r.plan.SampledBytes = all.raw
 	for _, i := range cands {
-		ratio := float64(all.packed) / float64(all.raw)
-		if t := per[i]; t != nil {
-			ratio = float64(t.packed) / float64(t.raw)
+		rec := r.a.files[r.nodes[i].rec]
+		t := per[i]
+		if t == nil {
+			t = byExt[ext(rec)]
 		}
-		r.estimate[i] = int64(math.Ceil(float64(r.a.files[r.nodes[i].rec].size) * ratio))
+		if t == nil {
+			t = byClass[class(rec)]
+		}
+		if t == nil {
+			t = &all
+		}
+		r.estimate[i] = int64(math.Ceil(float64(rec.size) * float64(t.packed) / float64(t.raw)))
 	}
 }
 
