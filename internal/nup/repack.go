@@ -293,6 +293,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	if werr != nil {
 		return res, werr
 	}
+	r = nil // the layout and plan grow with the file count; free them before verifying
 	if err := a.unchanged(); err != nil {
 		return res, err
 	}
@@ -325,7 +326,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 
 	binfmt.Check(ctx)
 	if opts.InPlace {
-		if res.SizeAfter >= res.SizeBefore && !res.ContentChanged && r.plan.PolicyFixes == 0 && !opts.Force {
+		if res.SizeAfter >= res.SizeBefore && !res.ContentChanged && res.Plan.PolicyFixes == 0 && !opts.Force {
 			reason := fmt.Sprintf("no savings after optimization (the rewrite was %d bytes); the original was kept", res.SizeAfter)
 			return skipped(res, reason, report), nil
 		}

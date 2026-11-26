@@ -103,6 +103,8 @@ func Extract(ctx context.Context, path, output string, selection []int, progress
 	manifest := []manifestPkg{}
 	destinations := map[string]bool{}
 	windows := runtime.GOOS == "windows"
+	s := &streamer{}
+	defer s.Close()
 
 	for _, k := range selected {
 		p := a.packages[k]
@@ -159,7 +161,7 @@ func Extract(ctx context.Context, path, output string, selection []int, progress
 			if err != nil {
 				return res, err
 			}
-			werr := a.streamFile(ctx, index, f, func(n int) {
+			werr := a.streamFile(ctx, s, index, f, func(n int) {
 				done += int64(n)
 				if progress != nil {
 					progress("Extracting verified files", 99*float64(done)/float64(max64(total, 1)))

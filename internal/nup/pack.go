@@ -231,7 +231,7 @@ func writeZeros(out *os.File, n int64) error {
 	if n <= 0 {
 		return nil
 	}
-	buf := make([]byte, 1<<20)
+	buf := make([]byte, min64(n, 1<<20))
 	for n > 0 {
 		c := int64(len(buf))
 		if n < c {

@@ -519,18 +519,52 @@ func (a *Archive) openFile(index int) (io.ReadCloser, error) {
 	return sr, nil
 }
 
+// streamer is the read buffer and zstd decoder streamFile reuses from one
+// file to the next; archives hold tens of thousands of small files.
+type streamer struct {
+	buf []byte
+	dec *zstd.Decoder
+}
+
+func (s *streamer) Close() {
+	if s.dec != nil {
+		s.dec.Close()
+	}
+}
+
 // streamFile decompresses file index, hashes it, and streams it to w (nil
-// discards), invoking perChunk after each output chunk.
-func (a *Archive) streamFile(ctx context.Context, index int, w io.Writer, perChunk func(n int)) error {
+// discards), invoking perChunk after each output chunk. It reads the extent
+// through a fresh handle, as openFile does.
+func (a *Archive) streamFile(ctx context.Context, s *streamer, index int, w io.Writer, perChunk func(n int)) error {
 	rec := a.files[index]
-	src, err := a.openFile(index)
+	f, err := os.Open(a.path)
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer f.Close()
+	var src io.Reader = io.NewSectionReader(f, rec.off, rec.stored)
+	if rec.codec == 1 {
+		if s.dec == nil {
+			dec, err := zstd.NewReader(nil,
+				zstd.WithDecoderMaxWindow(MaxWindow),
+				zstd.WithDecoderConcurrency(1),
+			)
+			if err != nil {
+				return err
+			}
+			s.dec = dec
+		}
+		if err := s.dec.Reset(src); err != nil {
+			return err
+		}
+		src = s.dec
+	}
+	if s.buf == nil {
+		s.buf = make([]byte, Block)
+	}
+	buf := s.buf
 	h := sha256.New()
 	var count int64
-	buf := make([]byte, Block)
 	for {
 		binfmt.Check(ctx)
 		n, rerr := src.Read(buf)
@@ -562,7 +596,9 @@ func (a *Archive) streamFile(ctx context.Context, index int, w io.Writer, perChu
 func (a *Archive) FileChunks(ctx context.Context, index int, w io.Writer) (err error) {
 	defer binfmt.Recover(&err)
 	binfmt.Require(index >= 0 && index < len(a.files), "Invalid file index.")
-	return a.streamFile(ctx, index, w, nil)
+	s := &streamer{}
+	defer s.Close()
+	return a.streamFile(ctx, s, index, w, nil)
 }
 
 // Verify re-hashes every unique extent and returns the stats (port of
@@ -572,6 +608,8 @@ func (a *Archive) Verify(ctx context.Context, progress binfmt.Progress) (stats S
 	total := a.stats["uncompressed"].(int64)
 	var done int64
 	verified := map[verifyKey]bool{}
+	s := &streamer{}
+	defer s.Close()
 	for i := range a.files {
 		binfmt.Check(ctx)
 		f := a.files[i]
@@ -584,7 +622,7 @@ func (a *Archive) Verify(ctx context.Context, progress binfmt.Progress) (stats S
 		if verified[key] {
 			done += f.size
 		} else {
-			if err := a.streamFile(ctx, i, nil, func(n int) {
+			if err := a.streamFile(ctx, s, i, nil, func(n int) {
 				done += int64(n)
 				if progress != nil {
 					progress("Verifying NUP files", 100*float64(done)/float64(max64(total, 1)))
