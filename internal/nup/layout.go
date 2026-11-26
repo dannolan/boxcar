@@ -118,7 +118,7 @@ func planLayout(ctx context.Context, packages []Package) *layout {
 			l.dirs[index] = dirNode{nameOff: no, nameLen: nl, first: start, count: len(namesSorted)}
 			return index
 		}
-		l.roots = append(l.roots, visit(tree, "", 0))
+		l.roots = append(l.roots, visit(tree, p.rootName, 0))
 	}
 
 	binfmt.Require(len(l.dirs)+len(l.files) < int(none), "Too many NUP nodes.")
@@ -161,6 +161,12 @@ func (l *layout) toc(packages []Package, meta []metaExtent) []byte {
 					}
 				}
 			}
+		}
+		if p.unsetDirs&1 != 0 {
+			exefs = none
+		}
+		if p.unsetDirs&2 != 0 {
+			romfs = none
 		}
 		binfmt.PutU64(toc, at+0, p.TitleID)
 		binfmt.PutU32(toc, at+8, uint32(root))

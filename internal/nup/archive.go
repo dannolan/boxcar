@@ -60,6 +60,10 @@ type Archive struct {
 	dirs     []dirRecord
 	trees    []map[string]int
 	stats    Stats
+
+	headerSize, headerVersion int
+	records                   [][3]uint32 // root, exefs, romfs per package
+	metaRaw                   [][]byte    // metadata blocks as stored
 }
 
 // Open parses a NUP archive (port of nup_format.Archive.__init__).
@@ -157,6 +161,7 @@ func (a *Archive) parse(ctx context.Context) {
 	binfmt.Require(flags == 0 && allZero(res) && fs == a.stamp.size && bo%16 == 0 && fs >= bo && bo >= to+ts && pc > 0 && pc <= 4096,
 		"Invalid NUP superblock.")
 	binfmt.Require(int64(48) <= ts && ts <= 256*1024*1024, "Invalid or excessive NUP table size.")
+	a.headerSize, a.headerVersion = hs, hv
 
 	toc := a.readAt(to, ts)
 	binfmt.Require(bytes.Equal(binfmt.SHA256Sum(toc), th), "NUP table SHA-256 mismatch.")
@@ -215,6 +220,7 @@ func (a *Archive) parse(ctx context.Context) {
 		binfmt.Require((mo == 0) == (ms == 0), "Invalid metadata extent.")
 		binfmt.Require(ms <= 32*1024*1024, "Package metadata exceeds 32 MiB.")
 		var metadata []TLV
+		var raw []byte
 		if ms != 0 {
 			// Metadata may live anywhere in the file as long as it stays
 			// in-bounds and does not overlap other extents (checked below).
@@ -225,7 +231,8 @@ func (a *Archive) parse(ctx context.Context) {
 			binfmt.Require(mo <= uint64(fs) && ms <= uint64(fs)-mo, "Invalid package metadata bounds.")
 			regions = append(regions, [2]int64{int64(mo), int64(mo) + int64(ms)})
 			var err error
-			metadata, err = parseTlvs(a.readAt(int64(mo), int64(ms)))
+			raw = a.readAt(int64(mo), int64(ms))
+			metadata, err = parseTlvs(raw)
 			if err != nil {
 				binfmt.Fail("%v", err)
 			}
@@ -235,7 +242,9 @@ func (a *Archive) parse(ctx context.Context) {
 			Files: map[string]*Source{}, Metadata: metadata,
 		})
 		records = append(records, [3]uint32{root, ex, rom})
+		a.metaRaw = append(a.metaRaw, raw)
 	}
+	a.records = records
 
 	validatePackages(a.packages)
 
@@ -415,6 +424,13 @@ func (a *Archive) parse(ctx context.Context) {
 			p.Directories = append(p.Directories, d)
 		}
 		sort.Strings(p.Directories)
+		p.rootName = a.dirs[root].name
+		if ex == none && directories["exefs"] {
+			p.unsetDirs |= 1
+		}
+		if rom == none && directories["romfs"] {
+			p.unsetDirs |= 2
+		}
 		for path, index := range paths {
 			idx := index
 			p.Files[path] = &Source{
@@ -423,6 +439,8 @@ func (a *Archive) parse(ctx context.Context) {
 					return a.openFile(idx)
 				},
 				validator: func() error { return a.unchanged() },
+				archive:   a,
+				index:     idx,
 			}
 		}
 		a.trees = append(a.trees, paths)

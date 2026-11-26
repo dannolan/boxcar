@@ -61,6 +61,13 @@ type Package struct {
 	Metadata    []TLV
 	Flags       int
 	Label       string
+
+	// Record details of a package read from an archive that a rewrite must
+	// reproduce: the root directory's name (normally empty) and which of
+	// exefs/ (bit 0) and romfs/ (bit 1) exist without the record pointing
+	// at them.
+	rootName  string
+	unsetDirs uint8
 }
 
 // PackageInfo is the typed form of a Python inspect() packages_info entry.
@@ -142,6 +149,8 @@ type Source struct {
 	size      int64
 	opener    func() (io.ReadCloser, error)
 	validator func() error
+	archive   *Archive // set for a file of a parsed archive
+	index     int      // its file record index in archive
 }
 
 type sourceStamp struct {
