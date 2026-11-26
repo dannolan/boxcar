@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **NUP optimizer: `boxcar optimize` / `nup --nup-operation optimize`.**
+  Rewrites existing NUPs without extracting them: reuses zstd frames,
+  compresses raw files with the presets, stores identical contents once and
+  applies the large-file RAW rule (`--recompress` re-encodes frames).
+  Lossless by default; outputs are verified file by file and compared with
+  the source's logical content (reported as a logical SHA-256) before an
+  exclusive commit or, with `--in-place`, an atomic replacement. Batch
+  mode: files or folders, `--recursive`, `--jobs`, per-archive and overall
+  progress, size statistics, skips already-optimized archives (`--min-gain`,
+  `--force`), keeps going past failures. `--dry-run` previews with size
+  estimates. `--latest-snapshot` is an opt-in consolidation. See
+  docs/OPTIMIZE.md for KaiDump and nx2-flow workflows.
 - **NUP reader: accept third-party-packed archives.** Package metadata may
   live anywhere in the file (in-bounds, non-overlapping) instead of requiring
   `blobOff <= metaOff`. Real-world NUPs from other packers were rejected by

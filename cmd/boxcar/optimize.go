@@ -212,13 +212,15 @@ func (p *progressPrinter) finished(index, count int, r nuptools.ArchiveResult) {
 		if !r.InPlace {
 			where = "written to " + r.Output
 		}
-		p.println(fmt.Sprintf("%s optimized %s; verified, %s", head, change(r.SizeBefore, r.SizeAfter), where))
+		p.println(fmt.Sprintf("%s optimized %s; %s\n    verified; logical SHA-256 %s -> %s", head, change(r.SizeBefore, r.SizeAfter), where,
+			short(r.LogicalSHA256), short(r.OutputLogicalSHA256)))
 	case "planned":
 		verdict := "would optimize"
 		if r.Action == "skip" {
 			verdict = "would skip"
 		}
-		p.println(fmt.Sprintf("%s %s: %s\n    %s; estimated %s", head, verdict, r.Reason, planSummary(r.Plan), change(r.SizeBefore, r.SizeAfter)))
+		p.println(fmt.Sprintf("%s %s: %s\n    %s; estimated %s; logical SHA-256 %s", head, verdict, r.Reason,
+			planSummary(r.Plan), change(r.SizeBefore, r.SizeAfter), short(r.LogicalSHA256)))
 	case "skipped":
 		p.println(fmt.Sprintf("%s skipped: %s", head, r.Reason))
 	default:
@@ -250,6 +252,14 @@ func (p *progressPrinter) summary(res nuptools.BatchResult) {
 	}
 	p.println(fmt.Sprintf("%d archive(s): %d optimized, %d skipped, %d planned, %d failed; %s %s of %s (%.1f%%)",
 		s.Archives, s.Optimized, s.Skipped, s.Planned, s.Failed, verb, humanBytes(s.SavedBytes), humanBytes(s.SizeBefore), s.SavedPercent))
+}
+
+// short abbreviates a hex digest for progress lines; the JSON has it whole.
+func short(digest string) string {
+	if len(digest) > 16 {
+		return digest[:16] + "…"
+	}
+	return digest
 }
 
 func abs64(n int64) int64 {

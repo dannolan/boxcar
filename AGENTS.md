@@ -50,8 +50,10 @@ Plain Go, no cgo: `go build ./... && go vet ./... && go test ./internal/... ./cm
    Do not "clean up" validation order or error messages — tests match on them.
 6. **No mmap anywhere.** Random access uses `internal/region` (pread-based).
 7. **No overwrite commits.** Outputs go to `name.<10-hex>.partial`, then a
-   platform-specific exclusive commit (`commit_*.go` / `platform_*.go` files).
-   Never use bare `os.Rename` for commit on Windows — it replaces.
+ platform-specific exclusive commit (`commit_*.go` / `platform_*.go` files).
+ Never use bare `os.Rename` for commit on Windows — it replaces. The only
+ replacement is `nup.Optimize` with `InPlace`, after full verification
+ (`replaceFile` in `internal/nup/platform_*.go`).
 8. **Symlinks/reparse points are refused** with the reference error strings.
 
 ## Conventions
@@ -97,8 +99,9 @@ sources at `<repo>/../nsp-box-src/src`.
 | `internal/snapshot` | engine.find_snapshots/source_inventory | dump discovery + stamps |
 | `internal/nsp` | engine.build/verify_image | NSP engine + independent verifier |
 | `internal/dlc` | dlc.py | DLC packager |
-| `internal/nup` | nup_format.py | NUP v1 format (pack/Archive/extract) |
-| `internal/nuptools` | nup_tools.py | discovery/merge/conversion orchestration |
+| `internal/nup` | nup_format.py | NUP v1 format (pack/Archive/extract) + optimize/repack (Go-only) |
+| `internal/nup/nuptest` | — | test-only writer for KaiDump-style NUP layouts |
+| `internal/nuptools` | nup_tools.py | discovery/merge/conversion orchestration, batch optimize |
 | `internal/patch` | emulator_patch*.py | PE surgery + embedded payloads |
 | `internal/artwork` | artwork.py | decode/crop → 256×256 JPEG icons |
 | `internal/keys` | compatibility.py | key placeholder setup |
