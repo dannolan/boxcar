@@ -159,11 +159,12 @@ func runOptimize(args []string) int {
 }
 
 // progressPrinter writes progress to stderr: one rewritten line on a
-// terminal, otherwise a line per 10% step.
+// terminal, otherwise a line per 10% step. The terminal line is cleared with
+// spaces rather than ANSI codes, which older Windows consoles print as text.
 type progressPrinter struct {
 	tty     bool
 	last    map[int]string
-	pending bool
+	pending int // width of the progress line currently shown
 }
 
 func newProgressPrinter() *progressPrinter {
@@ -183,17 +184,17 @@ func (p *progressPrinter) progress(ev nuptools.BatchProgress) {
 	p.last[ev.Index] = key
 	line := fmt.Sprintf("[%d/%d] %s: %s %d%% (overall %d%%)", ev.Index, ev.Count, filepath.Base(ev.Path), ev.Label, step, int(ev.Overall))
 	if p.tty {
-		fmt.Fprintf(os.Stderr, "\r\033[K%s", line)
-		p.pending = true
+		fmt.Fprintf(os.Stderr, "\r%s%s", line, strings.Repeat(" ", max(p.pending-len(line), 0)))
+		p.pending = len(line)
 	} else {
 		fmt.Fprintln(os.Stderr, line)
 	}
 }
 
 func (p *progressPrinter) println(line string) {
-	if p.pending {
-		fmt.Fprint(os.Stderr, "\r\033[K")
-		p.pending = false
+	if p.pending > 0 {
+		fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", p.pending))
+		p.pending = 0
 	}
 	fmt.Fprintln(os.Stderr, line)
 }
@@ -257,7 +258,7 @@ func (p *progressPrinter) summary(res nuptools.BatchResult) {
 // short abbreviates a hex digest for progress lines; the JSON has it whole.
 func short(digest string) string {
 	if len(digest) > 16 {
-		return digest[:16] + "…"
+		return digest[:16] + "..."
 	}
 	return digest
 }
