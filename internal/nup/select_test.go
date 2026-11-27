@@ -181,7 +181,8 @@ func TestOptimizeMeasureReplacesUncertainSkip(t *testing.T) {
 	}
 	opts.DryRun = false
 	res = optimizeT(t, in, opts)
-	if res.Status != "skipped" || !strings.Contains(res.Reason, "a full rewrite saved") || pathExists(opts.Output) {
+	// (measured by counting: no temporary file is written)
+	if res.Status != "skipped" || !strings.Contains(res.Reason, "counted, not written") || pathExists(opts.Output) {
 		t.Fatalf("measured run below the gain = %+v", res)
 	}
 	assertNoPartials(t, dir)

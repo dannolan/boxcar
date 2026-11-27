@@ -356,6 +356,33 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 			split = FAT32PartSize
 		}
 	}
+	// A rewrite that is likely to be discarded is measured first without
+	// writing: it runs against a writer that only counts, and only one that
+	// reaches the minimum gain is then written for real (a second,
+	// identical pass) and verified. Likely to be discarded: the estimate
+	// said skip (measuring), or it is sampled and under 1% of the archive,
+	// where sampling error is of the order of the savings. Required
+	// rewrites (fixes) and --force are written directly.
+	fixesPlanned := res.ContentChanged || r.plan.PolicyFixes > 0 || len(r.plan.Deviations) > 0
+	onePercent := max64(int64(math.Ceil(float64(r.plan.ArchiveSize)/100)), 1)
+	countFirst := measuring || (!opts.Force && !fixesPlanned && r.plan.Basis != "exact" && r.plan.EstimatedSavings < onePercent)
+	if countFirst {
+		cf := &countingFile{}
+		if _, werr := r.write(cf, func(done, total int64) {
+			report("Measuring NUP", 2+78*float64(done)/float64(max64(total, 1)))
+		}); werr != nil {
+			return res, werr
+		}
+		if err := a.unchanged(); err != nil {
+			return res, err
+		}
+		if saved := res.SizeBefore - cf.size; saved < need {
+			res.SizeAfter, res.SavedBytes = cf.size, saved
+			reason := fmt.Sprintf("already optimized: a full rewrite (counted, not written) would save %d bytes (%.2f%%), less than the minimum gain of %d bytes (%g%%); nothing was written",
+				saved, 100*float64(saved)/float64(max64(res.SizeBefore, 1)), need, opts.MinGain)
+			return skipped(res, reason, report), nil
+		}
+	}
 	tag := randomHex()
 	temp := final + "." + tag + ".partial"
 	var out outFile
@@ -1261,3 +1288,34 @@ func (w *repackWriter) copyExtent(rec fileRecord) {
 type keepFilesError struct{ msg string }
 
 func (e *keepFilesError) Error() string { return e.msg }
+
+// countingFile is an outFile that keeps nothing: it records the size the
+// output would have, so a rewrite can be measured without writing it.
+type countingFile struct{ pos, size int64 }
+
+func (c *countingFile) Write(p []byte) (int, error) {
+	c.pos += int64(len(p))
+	c.size = max64(c.size, c.pos)
+	return len(p), nil
+}
+
+func (c *countingFile) WriteAt(p []byte, off int64) (int, error) {
+	c.size = max64(c.size, off+int64(len(p)))
+	return len(p), nil
+}
+
+func (c *countingFile) Seek(off int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		c.pos = off
+	case io.SeekCurrent:
+		c.pos += off
+	default:
+		c.pos = c.size + off
+	}
+	return c.pos, nil
+}
+
+func (c *countingFile) Truncate(n int64) error { c.size = n; return nil }
+func (c *countingFile) Sync() error            { return nil }
+func (c *countingFile) Close() error           { return nil }
