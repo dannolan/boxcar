@@ -306,6 +306,18 @@ Optimized copies kept inside a folder you search later (for example
 `--recursive` run lists them and skips them as already optimized. The
 folder given as `--output` in the same run is never searched.
 
+## Benchmarks
+
+`go run ./scripts/bench` compares boxcar binaries on deterministic
+synthetic fixtures (large raw files, incompressible and pre-compressed
+assets, 40,000 small files, duplicates in three representations, mixed
+base/update/DLC, a multi-archive folder) and optionally on your own
+archives, including a second run of each profile. Results and method:
+[BENCHMARKS.md](BENCHMARKS.md). In short, against the PR baseline on 8
+CPUs: Mario Party Superstars 8.9 s -> 4.0 s, Animal Crossing 30.8 s ->
+8.7 s, verification about 6x faster, for 330-540 MB peak memory instead of
+43-138 MB.
+
 ## Workflow: KaiDump backups
 
 [KaiDump](https://github.com/BlafKing/KaiDump) can export a game, its
