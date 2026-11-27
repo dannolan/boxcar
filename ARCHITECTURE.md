@@ -125,7 +125,8 @@ func ValidatePackages(packages []Package) error
 func SafeName(name string, windows bool) error
 func PathParts(path string) ([]string, error)
 func Pack(ctx context.Context, packages []Package, output string, opts PackOptions) (Result, error)
-func Open(ctx context.Context, path string) (*Archive, error)       // Archive: Packages/Verify/Inspect/FileChunks/Contents/Deviations
+func Open(ctx context.Context, path string) (*Archive, error)       // Archive: Packages/Verify/Inspect/FileChunks/Contents/Deviations/Parts; path may be a first part or a folder of parts
+func FindParts(path string) (parts []string, name string, err error) // nx2-flow's nupparts.h rules; ErrLaterPart
 func Extract(ctx context.Context, path, output string, selection []int, progress binfmt.Progress) (Result, error)
 func PackagePath(p Package) string
 type Content struct{ TitleID uint64; Version uint32; Kind, Flags int; Root string; ExeFS, RomFS bool
@@ -133,8 +134,9 @@ type Content struct{ TitleID uint64; Version uint32; Kind, Flags int; Root strin
 func LogicalDigest(contents []Content) string
 func CompareContents(want, got []Content) error
 type RepackOptions struct{ Level int; LargeRaw bool; LargeFileThreshold int64; MinSavings float64; Recompress bool; Progress binfmt.Progress }
+var Profiles map[string]RepackOptions                               // "runtime" (DefaultProfile), "archive", "fast"; ProfileOptions(name)
 type OptimizeOptions struct{ RepackOptions; Output string; InPlace, DryRun, Force bool; MinGain float64
-    Transform func(context.Context, []Package) ([]Package, error) }
+    Measure bool; SplitSize int64; Transform func(context.Context, []Package) ([]Package, error) }
 func Optimize(ctx context.Context, path string, opts OptimizeOptions) (OptimizeResult, error) // OptimizeResult{Status, Plan, Stats, LogicalSHA256, ...}
 
 // nuptools (batch optimize; the rest of the package contract is in nuptools.go)
@@ -206,7 +208,14 @@ every push with a pinned reference checkout.
   (`patch_windows.go`/`platform_windows.go`). Error text mirrors Python.
 - **No mmap**: all random access goes through `internal/region`.
 - **Streaming only**: never read game files or outputs fully into memory;
-  compose with `stream` and write via `WriteTo`.
+  compose with `stream` and write via `WriteTo`. The one bounded exception
+  is the optimizer's parallel path (`internal/nup/parallel.go`): files up
+  to 32 MiB are read ahead into 1 MiB chunks claimed from a process-wide
+  128 MiB budget, and CPU work holds one of GOMAXPROCS tokens; larger files
+  stream. Output order and bytes do not depend on the worker count.
+- **Archives in parts** follow nx2-flow's `nupparts.h` exactly (`parts.go`);
+  Boxcar writes only `<name>.NNN` parts of one size, publishes them last to
+  first with `commitNew`, and never replaces parts in place.
 
 ## Deviations from the reference (all intentional)
 

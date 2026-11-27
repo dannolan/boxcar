@@ -65,7 +65,12 @@ Plain Go, no cgo: `go build ./... && go vet ./... && go test ./internal/... ./cm
   `checkpoint()`; plumb `context.Context` as first arg everywhere.
 - Progress: `binfmt.Progress` = `func(label string, done float64)` (0–100);
   keep the Python label/percent phase ranges when porting a flow.
-- zstd: klauspost levels map 1→SpeedFastest, 3→SpeedDefault, 9→SpeedBetterCompression.
+- zstd: klauspost levels map 1→SpeedFastest, 3→SpeedDefault, 9→SpeedBetterCompression;
+  19 (`nup.LevelBest`, optimizer only) →SpeedBestCompression. Windows stay 8 MiB.
+- Optimizer storage policy has one implementation (`codecPolicy`); profiles
+  (`internal/nup/profile.go`) are presets of `RepackOptions`, never a
+  second code path. Benchmarks: `go run ./scripts/bench` (fixtures in
+  `internal/nup/nuptest/fixtures.go`; keep real-game data out of the repo).
 - Versions: bump `cmd/boxcar/main.go` `const version` AND add a CHANGELOG.md
   section in the same commit; releases are tags `v<version>` (workflow builds
   darwin universal/arm64/amd64, windows amd64/arm64, linux amd64/arm64).

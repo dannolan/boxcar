@@ -140,7 +140,7 @@ boxcar optimize game.nup --output game.small.nup    # new, verified copy; origin
 boxcar optimize ./games --recursive --in-place      # replace originals after verification
 ```
 
-Rewrites archives without extracting them: reuses existing zstd frames, compresses raw files with the presets, stores identical files once and applies the large-file raw rule. Every rewrite is verified (each file's SHA-256 plus a logical-content comparison) before it is committed, and originals are replaced only with `--in-place`. Equivalent to `boxcar nup --nup-operation optimize --input …`. Workflows for KaiDump backups and nx2-flow, all flags, and how to test on a real archive: [docs/OPTIMIZE.md](docs/OPTIMIZE.md).
+Rewrites archives without extracting them: reuses existing zstd frames, compresses raw files, stores identical files once (from the best of their copies) and applies a storage profile: `runtime` (default, for nx2-flow: files over 128 MiB raw, 5% minimum saving per file), `archive` (smallest, zstd 19) or `fast`. Every rewrite is verified (each file's SHA-256 plus a logical-content comparison) before it is committed, and originals are replaced only with `--in-place`. Archives kept in parts for FAT32 cards (`Game.nup.001`, ...) are read directly and written with `--split` (automatic on FAT volumes). Compression and verification use every CPU. Equivalent to `boxcar nup --nup-operation optimize --input …`. Workflows for KaiDump backups and nx2-flow, all flags, benchmarks and how to test on a real archive: [docs/OPTIMIZE.md](docs/OPTIMIZE.md).
 
 ### Emulator patch (reversible, offline)
 

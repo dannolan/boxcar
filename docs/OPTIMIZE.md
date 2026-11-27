@@ -1,16 +1,19 @@
 # Optimizing NUP archives
 
 `boxcar optimize` rewrites existing NUP archives without extracting them. It
-reuses compressed data that is already good, compresses what was stored raw
-with Boxcar's presets, stores identical files once, applies the large-file
-RAW rule, and verifies the result before anything replaces an original. It
-works on single archives and on whole game libraries.
+reuses compressed data that is already good, compresses what was stored raw,
+stores identical files once (from the best of their copies), applies the
+storage policy of a profile, and verifies the result before anything
+replaces an original. It works on single archives, archives kept in parts
+for FAT32 cards, and whole game libraries.
 
 ```bash
 boxcar optimize game.nup --dry-run                  # preview; writes nothing
 boxcar optimize game.nup --output game.small.nup    # new file; original untouched
+boxcar optimize game.nup --output small.nup --profile archive   # smallest, for storage
 boxcar optimize ./games --recursive --dry-run       # preview a library
 boxcar optimize ./games --recursive --in-place      # replace originals after verification
+boxcar optimize Game.nup.001 --output /sd/nx2-flow/games/Game.nup --split fat32
 ```
 
 `boxcar optimize PATH...` is shorthand for the NUP tool syntax
@@ -48,7 +51,12 @@ runnable snapshot (the same merge `pack` performs by default), keeping DLC.
 ### How each file is stored
 
 Each distinct file content (same SHA-256 and size) is stored once; every
-other file with that content points at the same extent.
+other file with that content points at the same extent. When the source
+holds one content several times in different forms (raw in the base, a
+fast frame in an update, a strong frame in a DLC), the output is built from
+the best copy the policy allows: the smallest compliant frame, or a raw copy
+when the policy wants the file raw; it is never re-compressed from a worse
+copy. Every dropped copy is still read and checked against the SHA-256.
 
 | Stored in the source as | Storage policy says | Result |
 |---|---|---|
@@ -57,18 +65,29 @@ other file with that content points at the same extent.
 | raw | compress | compressed with `--preset`; kept raw when zstd does not save enough |
 | raw | raw: larger than `--large-file-threshold` | copied verbatim |
 
-The policy is the one `pack` uses: files above `--large-file-threshold`
-(default `256MiB`) stay raw unless you pass `--no-large-files-raw`, and a
-compressed file is kept only if it is smaller than the raw file (or, with
-`--min-savings N`, at least N percent smaller).
+The policy is the one `pack` uses, with the profile's settings (see
+[Profiles](#profiles)): files above `--large-file-threshold` stay raw when
+the large-file rule is on, and a compressed file is kept only if it is at
+least `--min-savings` percent smaller than the raw file (any saving at 0).
 
 An archive counts as **already optimized** when the estimated savings are
-below `--min-gain` (default 1% of the archive), nothing breaks the storage
-policy and it follows the NUP spec. Such archives are skipped unless you
-pass `--force`. Archives whose compressed files break the policy (for
-example a 1 GiB file compressed by another tool while the threshold is
-256 MiB) are always rewritten, even if the result is larger, because that
-is what the policy asks for.
+below the minimum gain, nothing breaks the storage policy and it follows
+the NUP spec. Such archives are skipped unless you pass `--force`. The
+minimum gain is 1% of the archive for archives found by searching a folder
+and any saving at all for archives you name explicitly (`--min-gain`
+overrides both). For an explicitly named archive whose estimate is not
+exact (sampled, or `--recompress`, whose gain cannot be estimated), a
+"skip" verdict is not trusted: Boxcar performs the real rewrite, keeps it
+if it saves the minimum gain (at least one byte) and otherwise discards it
+and reports `skipped` with the measured result. A second run over the
+result of `--recompress` or the archive profile therefore writes nothing,
+but it spends the encoding time again, because a zstd frame does not record
+the level it was made with.
+
+Archives whose compressed files break the policy (for example a 1 GiB file
+compressed by another tool while the threshold is 128 MiB) are always
+rewritten, even if the result is larger, because that is what the policy
+asks for.
 
 ### Archives that deviate from the spec
 
@@ -80,11 +99,86 @@ optimizing rewrites them even when there is nothing to save, because the
 rewrite is compliant (`normalized:` in the output). The JSON lists them
 under `plan.deviations` (`notes` for verify/inspect).
 
+## Profiles
+
+A profile is a named starting point for the storage policy; any explicit
+flag (`--preset`, `--large-file-threshold`, `--min-savings`,
+`--recompress`, `--no-large-files-raw`) overrides its one setting. There is
+only one policy implementation; profiles are presets of it.
+
+| Profile | Level | Large files raw | Min savings per file | Existing frames | For |
+|---|---|---|---|---|---|
+| `runtime` (default) | Balanced (3) | above 128 MiB | 5% | reused | archives nx2-flow loads from the card |
+| `archive` | Best (zstd 19) | no | any | re-encoded, smaller kept | storage and transfer only |
+| `fast` | Fast (1) | above 256 MiB | any | reused | quick normalization and deduplication |
+
+Why these values:
+
+- **128 MiB** (`runtime`): nx2-flow's loader (checked against 0.1.7,
+  `loader/runtime/game.c`) unpacks a compressed file whole, on first read,
+  into a cache of max(192 MiB, largest compressed file + 64 MiB), capped at
+  the total of the compressed files, taken from the memory the game could
+  use (games with 1 GB or more of "apart" memory use max(largest + 16 MiB,
+  48 MiB) instead). Keeping every compressed file at or under 128 MiB keeps
+  that cache at its 192 MiB floor. What matters is the file's unpacked size;
+  the loader streams the frame in 1 MiB pieces, so the frame size does not.
+  Its decoder keeps zstd's default window limit (2^27 = 128 MiB); Boxcar's
+  encoder uses an 8 MiB window at every level, so all frames load.
+- **5%** (`runtime`): a heuristic, not a loader limit. A file that zstd
+  shrinks by less than 5% saves almost nothing on the card but costs a full
+  unpack into the cache and decompression time on the console; storing it
+  raw lets the loader read it in place. Measured on Mario Party Superstars
+  it keeps 0.4% of the archive raw that 0% would compress.
+- **Best** (`archive`): klauspost's `SpeedBestCompression`, offered for
+  `optimize` only (`pack` keeps the reference levels 1, 3 and 9). On the
+  synthetic benchmarks it is 2-3% smaller than Balanced on compressible
+  data and 3-10x slower, with about 350-650 MB peak memory (its encoders
+  are large); see [Benchmarks](#benchmarks).
+
+`--latest-snapshot` (consolidating base and updates) stays opt-in in every
+profile, because it changes content.
+
+## Archives in parts
+
+A FAT32 card takes no file of 4 GiB or more, so NUP archives for nx2-flow
+are often cut into parts. Boxcar follows nx2-flow's own convention
+([docs/layout.md](https://github.com/Olmectron/nx2-flow/blob/main/docs/layout.md),
+"A NUP file in parts"; `loader/runtime/nupparts.h` is its definition) rather
+than inventing one:
+
+- **Reading**: `optimize`, `nup --nup-operation verify`/`inspect`/`extract`
+  accept the first part (`Game.nup.001`, `Game.nup.00`, `Game.nup.part1`,
+  `Game.nup.aa`, `Game.nu0`, `Game.part1.nup`, `Game.001.nup`) or a folder
+  holding nameless parts `00`, `01`, ... (or one game's named parts). Parts
+  must be numbered from 0 or 1 with none missing and be at least two (a
+  folder of nameless parts may hold one); at most 64 parts. A name that only
+  looks like a part (`Game.nup.001` with no `.002`) is a file of its own; a
+  later part is refused with a pointer to the first. Folder searches list
+  each archive in parts once.
+- **Writing**: `--split SIZE` writes the output as `<name>.001`,
+  `<name>.002`, ... of SIZE bytes each (the last takes the rest), exactly as
+  nx2-flow's file receiver names them; `--split fat32` uses the receiver's
+  size, 4 GiB - 64 KiB. The default, `--split auto`, does that only when the
+  output folder is on a FAT volume (detected on Linux, macOS and Windows;
+  not through FUSE), where a whole file of 4 GiB would fail. An output that
+  fits in one part is written as one plain file. `--split none` never
+  splits.
+- **Publication**: parts are written under temporary names, verified as one
+  archive, and then published one by one with the same exclusive
+  publication as single files, from the last part to the first. nx2-flow
+  takes a game only from its first part on, so the game appears on the card
+  only once it is complete. If a publication fails, the parts published so
+  far are removed. An existing output, or a stray `<name>.NNN` beside it
+  that the loader would read as one of its parts, is refused before
+  anything is written.
+- An archive in parts cannot be replaced `--in-place` (several files cannot
+  be swapped atomically); optimize it to `--output` instead.
+
 ## Safety
 
 - The source archive is never written to. The new archive is written to
-  `<destination>.<random>.partial` next to its destination, after checking
-  there is room for the worst case.
+  `<destination>.<random>.partial` (parts: `<destination>.NNN.<random>.partial`)
+  next to its destination, after checking there is room for the worst case.
 - When writing is done, Boxcar reopens the new archive with the full parser,
   decompresses every file and checks it against its SHA-256, and compares
   the logical content with the source's (both logical SHA-256 values are
@@ -143,10 +237,33 @@ under `plan.deviations` (`notes` for verify/inspect).
 
 `--in-place` needs free space for one complete optimized copy on the same
 drive while it works. Memory use does not depend on how large the files
-are, since every file streams through fixed buffers; it grows with how many
-files the archive holds, because their table is kept in memory. In tests a
-4.1 GB archive of 22,000 files peaked at about 75 MB and a 67,000-file
-archive at about 130 MB, per concurrent job.
+are: files above 32 MiB stream through fixed buffers, and smaller ones are
+read ahead into a shared 128 MiB pool (see [Concurrency](#concurrency-and-resources)).
+It grows with how many files the archive holds, because their table is kept
+in memory. Measured peaks (8 CPUs, `runtime`): Mario Party Superstars
+(2.9 GB, 820 files) about 300 MB, Animal Crossing (6.7 GB, 67,000 files)
+about 550 MB; the `archive` profile adds roughly 300 MB of encoder state.
+
+## Concurrency and resources
+
+- **Inside one archive**, files up to 32 MiB that are compressed or
+  re-encoded are read, checked and encoded by one worker per CPU while a
+  single writer writes them in layout order, so the output is byte for byte
+  the same for any number of workers. Larger files stream on the writer.
+  Workers share encoders, and a raw fallback is written from memory without
+  reading the source again. Verification of the new archive also checks
+  its distinct extents on every CPU.
+- **Budgets are process-wide**: one CPU token per CPU (held while
+  encoding or verifying) and 128 MiB of read-ahead buffers, shared by all
+  archives of a run; the pool and the encoders are released when no archive
+  is being written. Cancelling returns every claim.
+- **Across archives**, `--jobs 0` (default) runs min(archives, 4, CPUs/2)
+  at once, because each archive's planning, writer and commit are serial.
+  Measured on 8 CPUs: four 125 MB archives 2.3 s with one job, 1.4 s with
+  two and 1.0 s with four, with no more peak memory; Mario Party plus
+  Animal Crossing 14.8 s with one job and 13.3 s with two, for about 23%
+  more peak memory. `--jobs N` fixes the number.
+- Free space for concurrent jobs is reserved per drive (see Safety).
 
 ## Options
 
@@ -156,13 +273,15 @@ archive at about 130 MB, per concurrent job.
 | `--in-place` | off | Replace each archive after its rewrite is verified |
 | `--dry-run` | off | Plan and estimate only; nothing is written |
 | `--recursive` | off | Also search subfolders of folder inputs |
-| `--jobs N` | 1 | Archives optimized at the same time |
-| `--preset` | `Balanced` | zstd level for files that get compressed: `Fast` (1), `Balanced` (3), `Smaller` (9) |
-| `--recompress` | off | Re-encode already-compressed files with `--preset`, keeping the smaller frame |
-| `--large-files-raw` / `--no-large-files-raw` | on | Keep files above the threshold uncompressed |
-| `--large-file-threshold SIZE` | `256MiB` | The large-file threshold (`64MiB`, `1.5GiB`, bytes...; KB/MB/GB are decimal) |
-| `--min-savings PCT` | 0 | Store a file raw unless zstd saves at least PCT percent of it |
-| `--min-gain PCT` | 1 | Skip archives whose estimated savings are below PCT percent |
+| `--jobs N` | 0 (auto) | Archives optimized at the same time; 0 = min(archives, 4, CPUs/2) |
+| `--profile` | `runtime` | Storage policy preset: `runtime`, `archive` or `fast` (see [Profiles](#profiles)); the flags below override single settings |
+| `--preset` | profile's | zstd level for files that get compressed: `Fast` (1), `Balanced` (3), `Smaller` (9), `Best` (19) |
+| `--recompress` | profile's | Re-encode already-compressed files with `--preset`, keeping the smaller frame |
+| `--large-files-raw` / `--no-large-files-raw` | profile's | Keep files above the threshold uncompressed |
+| `--large-file-threshold SIZE` | profile's | The large-file threshold (`64MiB`, `1.5GiB`, bytes...; KB/MB/GB are decimal); implies `--large-files-raw` |
+| `--min-savings PCT` | profile's | Store a file raw unless zstd saves at least PCT percent of it |
+| `--min-gain PCT` | auto | Skip archives whose estimated savings are below PCT percent (auto: 1 for archives found in folders, any saving for archives named explicitly) |
+| `--split SIZE` | `auto` | Write outputs as parts of SIZE (`fat32` = 4 GiB - 64 KiB; `auto` = fat32 on FAT volumes only; `none`) |
 | `--force` | off | Rewrite archives even when they look already optimized |
 | `--latest-snapshot` | off | Merge base and updates into the latest snapshot (changes content) |
 | `--result-json FILE` | | Also write the JSON result to a new file |
@@ -173,9 +292,14 @@ archive at about 130 MB, per concurrent job.
 Progress and one line per archive go to stderr; the JSON result goes to
 stdout. A dry run estimates the output size by compressing every file that
 would be compressed or, when that is more than 64 MiB, evenly spread
-samples of them; sampled estimates are approximate and lean conservative
-(`"exact": false` in the plan), and a real run always reports the actual
-sizes.
+samples of them. The plan says how far to trust the number:
+`savings_basis` is `exact` (every candidate was compressed),
+`estimated` (sampled; on Mario Party the estimate was 1.1% for an actual
+1.8%) or `lower_bound` (`--recompress`: re-encoding is assumed to gain
+nothing); `exact_savings` is the part known exactly (deduplication, frames
+reused, policy decisions that need no compression). A real run always
+reports the actual sizes, and see above for how an uncertain skip of an
+explicitly named archive is measured instead of trusted.
 
 Optimized copies kept inside a folder you search later (for example
 `games/optimized/` under `games/`) are archives like any other: a later
@@ -214,37 +338,34 @@ duplicates.
 ## Workflow: nx2-flow
 
 [nx2-flow](https://github.com/Olmectron/nx2-flow) runs games straight from
-NUP files on the SD card. Its loader reads raw files directly from the card,
-but, in its own words, "a file kept packed in the NUP file is unpacked whole
-the first time it is read". As of loader 0.1.6 it keeps those unpacked files
-in a memory cache sized at the larger of 192 MiB and the largest compressed
-file plus 64 MiB, taken from the memory the game could otherwise use. Size
-is therefore not the only goal: large compressed files cost memory and
-loading time on the console.
-
-A setting that keeps every compressed file at or under 128 MiB (so the
-cache stays at its 192 MiB minimum) and leaves barely-compressible files
-raw:
+NUP files on the SD card. Its loader reads raw files directly from the card
+and unpacks a compressed file whole the first time it is read, into a cache
+taken from the game's memory (details under [Profiles](#profiles)). Size is
+therefore not the only goal: large compressed files cost memory and loading
+time on the console. The default `runtime` profile is made for this:
 
 ```bash
-boxcar optimize Game.nup --output Game.nx2.nup --large-file-threshold 128MiB --min-savings 5
-boxcar optimize /path/to/games --recursive --in-place --large-file-threshold 128MiB --min-savings 5
+boxcar optimize Game.nup --output Game.nx2.nup
+boxcar optimize /path/to/games --recursive --in-place
 ```
 
 If a game runs out of memory or stalls while loading big assets, lower the
-threshold further (for example `32MiB`). Re-running with a lower threshold
-rewrites the compressed files above it as raw, so the archive may grow;
-that is expected.
+threshold (for example `--large-file-threshold 32MiB`). Re-running with a
+lower threshold rewrites the compressed files above it as raw, so the
+archive may grow; that is expected.
 
 Copy the optimized `.nup` into the `games` folder that nx2-flow uses
 (`/nx2-flow/games/` by default), or write it there directly with
-`--output` (exFAT and FAT32 cards work; the temporary file needs room on
-the card). Boxcar works on single-file archives; if
-your card is FAT32 and the archive is 4 GiB or more, optimize the single
-file first and then split it the way nx2-flow's
-[docs/layout.md](https://github.com/Olmectron/nx2-flow/blob/main/docs/layout.md)
-describes (`Game.nup.001`, `Game.nup.002`, ...). Join split parts back into
-one file before optimizing them again.
+`--output` (the temporary file needs room on the card). On a FAT32 card,
+an output of 4 GiB or more is written as `Game.nup.001`, `Game.nup.002`,
+... automatically (`--split auto`); pass `--split fat32` when the card is
+mounted in a way Boxcar cannot recognise as FAT (for example through
+FUSE). Archives already in parts can be optimized directly from their
+first part.
+
+Not yet validated on a console: the profile values follow the loader's
+source, and the parts follow its naming code, but neither has been loaded
+on hardware by this change. Please report results.
 
 ## Testing on a real archive
 
@@ -275,8 +396,8 @@ go build -o boxcar ./cmd/boxcar            # Windows: go build -o boxcar.exe ./c
 
 Step 4 already verifies the copy and compares its logical content with the
 original before committing it; steps 2 and 5 repeat those checks
-independently. For nx2-flow, add `--large-file-threshold 128MiB
---min-savings 5` to step 4 and load `Game.optimized.nup` on the console.
+independently. For nx2-flow the default `runtime` profile applies; load
+`Game.optimized.nup` on the console.
 Once satisfied, `--in-place` does the same for originals.
 
 On Windows use `.\boxcar.exe` in PowerShell. `jq -r '.archives[].logical_sha256'`
@@ -312,23 +433,41 @@ Output of optimizing a small all-raw test archive (abridged):
 }
 ```
 
-`status` is `optimized`, `skipped` (see `reason`), `planned` (dry run;
-`action` says `optimize` or `skip`) or `failed` (see `error`). Sizes are
-bytes. For dry runs `size_after` is the estimate. `plan` describes the
-decisions per distinct content (`reuse_frames`, `compress`, `reencode`,
-`decode`, `keep_raw`, `duplicate_files`, `redundant_bytes`,
-`policy_fixes`); `stats` reports what the run actually did.
+`status` is one of:
+
+| Status | Meaning |
+|---|---|
+| `optimized` | written, verified and committed, and smaller |
+| `normalized` | written, verified and committed, not smaller, but required: a policy fix, a spec deviation or `--latest-snapshot` |
+| `skipped` | left as it is; `reason` says why (already optimized, measured rewrite too small, in place not smaller) |
+| `planned` | dry run; `action` says `optimize` or `skip` |
+| `failed` | see `error`; nothing was written or replaced |
+
+Every written archive is verified, so `verified` is true for `optimized`
+and `normalized`. Sizes are bytes. For dry runs `size_after` is the
+estimate. `parts` lists the output's parts when it was written in parts
+(`output` is the first). `policy` echoes the effective settings (profile,
+level, threshold, min savings, recompress, jobs, `split_size`). `plan`
+describes the decisions per distinct content (`reuse_frames`, `compress`,
+`reencode`, `decode`, `keep_raw`, `duplicate_files`, `redundant_bytes`,
+`better_extents`, `policy_fixes`) and the estimate's `savings_basis`;
+`stats` reports what the run actually did.
+
+The exit status is 0 when every archive was optimized, normalized, skipped
+or planned, and 1 when any failed or the arguments were unusable.
 
 ## Limitations
 
-- Archives split into parts (a folder named `*.nup`, or `Game.nup.001`...)
-  must be joined into one file first.
+- Archives in parts cannot be replaced in place; write them to `--output`.
 - Archives with a superblock extension Boxcar does not know (header size
   other than 0x80 or header version other than 1) are refused rather than
   rewritten.
-- Compression inside one archive uses one core; `--jobs` runs several
-  archives in parallel.
-- With `--recompress`, the estimate assumes no gain; the real run keeps
-  whichever frame is smaller.
+- Files above 32 MiB are compressed on one core each (streamed); smaller
+  files use every core.
+- With `--recompress` (and the `archive` profile) the estimate assumes no
+  gain; the real run keeps whichever frame is smaller and discards the
+  rewrite if it saves nothing, after spending the encoding time.
+- FAT volumes are recognised on Linux (vfat), macOS and Windows; through
+  FUSE, or on other systems, pass `--split fat32` yourself.
 - `--in-place` writes a new file and renames it over the old one, so other
   hard links to the original keep the old bytes.

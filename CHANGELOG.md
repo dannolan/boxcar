@@ -38,6 +38,35 @@
   free-space reservation per drive. `Pack` registers its temp-file cleanup
   only after the exclusive create succeeded and also publishes through the
   exclusive commit (works on exFAT/FAT32).
+- **Optimizer: best duplicate extent, profiles, planning.** When one
+  content is stored several times (raw, fast frame, strong frame), the
+  output is built from the best copy the policy allows instead of the
+  first; dropped copies are still checked. `--profile runtime` (default;
+  nx2-flow: Balanced, files over 128 MiB raw, 5% minimum per-file saving),
+  `archive` (zstd 19 "Best", no large-file rule, frames re-encoded) and
+  `fast`; explicit flags override single settings. Plans report
+  `savings_basis` (exact / estimated / lower_bound) and `exact_savings`.
+  Explicitly named archives get any saving (`--min-gain` auto: 1% only for
+  archives found in folders), and an uncertain skip is measured by a real
+  rewrite instead of trusted; a recompression that saves nothing is
+  discarded, so repeated runs write nothing. New status `normalized`
+  (rewritten for a policy fix or spec deviation without getting smaller).
+- **Optimizer throughput.** Files up to 32 MiB are read, checked and
+  encoded by one worker per CPU ahead of a single in-order writer (output
+  identical for any worker count) under process-wide CPU and 128 MiB
+  memory budgets; raw fallbacks no longer re-read the source; verification
+  runs on all CPUs; `--jobs 0` runs up to four archives at once. Mario
+  Party Superstars (2.9 GB) 10.9 s -> about 3.5 s, Animal Crossing
+  (6.7 GB, 67k files) 39.6 s -> about 9-10 s on 8 CPUs.
+- **NUP archives in parts (nx2-flow's convention).** Reading accepts the
+  first part or a folder of parts in every naming nx2-flow's loader
+  accepts; `optimize --split SIZE|fat32|auto|none` writes `<name>.001`,
+  `<name>.002`, ... like nx2-flow's receiver, automatically on FAT
+  volumes, published last part first so a game appears only complete.
+- **Benchmarks.** `go run ./scripts/bench` compares boxcar binaries on
+  deterministic synthetic fixtures (`internal/nup/nuptest.Fixtures`) and
+  optionally real archives: wall, CPU, peak RSS, bytes read/written, peak
+  disk, ratio, verify throughput and idempotence.
 - **Faster NUP verification and extraction.** Read buffers and zstd
   decoders are reused across files, and alignment padding no longer
   allocates 1 MiB per extent; on a 67,000-file archive, verification went
