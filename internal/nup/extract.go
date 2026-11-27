@@ -155,18 +155,12 @@ func Extract(ctx context.Context, path, output string, selection []int, progress
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return res, err
 			}
-			f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
-			if err != nil {
-				return res, err
-			}
-			werr := a.streamFile(ctx, index, f, func(n int) {
+			if werr := a.extractFile(ctx, index, target, func(n int) {
 				done += int64(n)
 				if progress != nil {
 					progress("Extracting verified files", 99*float64(done)/float64(max64(total, 1)))
 				}
-			})
-			f.Close()
-			if werr != nil {
+			}); werr != nil {
 				return res, werr
 			}
 		}
@@ -207,6 +201,20 @@ func Extract(ctx context.Context, path, output string, selection []int, progress
 		progress("Extraction complete", 100)
 	}
 	return Result{Output: output, Size: total, Verified: true, Packages: len(selected)}, nil
+}
+
+// extractFile writes archive file index to a new file at target. The output
+// is closed by defer on every exit, including the binfmt panic streamFile
+// raises on cancellation or a digest mismatch, so the deferred stage cleanup
+// can remove the partial file (Windows cannot delete an open file).
+func (a *Archive) extractFile(ctx context.Context, index int, target string, perChunk func(n int)) error {
+	binfmt.Check(ctx)
+	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return a.streamFile(ctx, index, f, perChunk)
 }
 
 // casefold is a UTF-8 case-folding approximation of Python str.casefold
