@@ -581,6 +581,10 @@ func (a *Archive) streamFile(ctx context.Context, s *streamer, index int, w io.W
 			s.dec = dec
 		}
 		if err := s.dec.Reset(src); err != nil {
+			// A failed Reset leaves the decoder in an unknown state; drop it
+			// so the next file gets a fresh one.
+			s.dec.Close()
+			s.dec = nil
 			return err
 		}
 		src = s.dec

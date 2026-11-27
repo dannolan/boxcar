@@ -376,7 +376,10 @@ func skipped(res OptimizeResult, reason string, report func(string, float64)) Op
 }
 
 // replaceSource swaps the verified temp file over the source archive after
-// checking the source is still the very file that was read.
+// checking the source is still the very file that was read. The check and
+// the rename are separate steps; lockSource keeps other Boxcar runs out of
+// that window, but a program that ignores the lock and rewrites the file in
+// that instant is not detected.
 func replaceSource(path, temp string, stamp archiveStamp) error {
 	st, err := os.Lstat(path)
 	if err != nil {

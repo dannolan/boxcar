@@ -107,6 +107,13 @@ under `plan.deviations` (`notes` for verify/inspect).
   explicit access lists on the original are not copied. If the rewrite is
   not smaller, the original is kept unless a policy fix, a spec deviation,
   `--latest-snapshot` or `--force` requires the rewrite.
+- These checks guard against other Boxcar runs and against a file that
+  changed or was replaced while it was being optimized. They are not
+  atomic against another program writing to the same path at the same
+  instant: the empty-file reservation above, and the identity check right
+  before an in-place rename, each leave a brief window. The advisory lock
+  is skipped on filesystems that refuse it (some network mounts). Do not
+  point two different tools at the same archive at once.
 - Errors and Ctrl-C remove the partial file and leave the original as it
   was. A second Ctrl-C exits immediately. After a hard kill or power loss the
   original is still intact; a stray `*.partial` file may remain and can be

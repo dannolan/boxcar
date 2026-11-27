@@ -33,7 +33,11 @@ func commitNew(temporary, output string) error {
 
 // claimAndRename is the last-resort exclusive commit: it creates output
 // with O_EXCL and renames temporary over that claim, giving up (and
-// removing the claim) if the claim was replaced in between.
+// removing the claim) if the claim was replaced in between. The check and
+// the rename are not one atomic step: a process that writes into the empty
+// claim in that instant loses its data. That needs a non-cooperating writer
+// on a filesystem with neither hard links nor an exclusive rename, which is
+// why this path is the last resort (documented in docs/OPTIMIZE.md).
 func claimAndRename(temporary, output string) error {
 	claim, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
 	if err != nil {
@@ -61,8 +65,10 @@ func claimAndRename(temporary, output string) error {
 }
 
 // lockSource holds an advisory lock on path for an in-place rewrite so two
-// optimizers cannot replace the same archive at once. Filesystems without
-// flock are used unlocked.
+// optimizers cannot replace the same archive at once. The lock is advisory:
+// it coordinates Boxcar runs, not other programs. Filesystems that refuse
+// flock (rare on local disks; some network mounts) are used unlocked, and
+// replaceSource's identity check is then the only guard.
 func lockSource(path string) (func(), error) {
 	f, err := os.Open(path)
 	if err != nil {
