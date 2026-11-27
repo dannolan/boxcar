@@ -22,6 +22,9 @@ type reservation struct {
 var (
 	mu   sync.Mutex
 	held = map[*reservation]bool{}
+	// available is Available, replaceable in tests: a real volume's free
+	// space moves with every other writer on it.
+	available = Available
 )
 
 // Reserve claims need bytes on the volume holding dir for a write into temp,
@@ -48,7 +51,7 @@ func ReserveFunc(dir string, written func() int64, need int64) (release func(), 
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	free, err := Available(dir)
+	free, err := available(dir)
 	if err != nil {
 		return nil, err
 	}

@@ -210,6 +210,9 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 		}
 	}
 	binfmt.Check(ctx)
+	if err := out.Close(); err != nil { // (Windows cannot move an open file)
+		return res, err
+	}
 	if err := commitNew(temp, output); err != nil {
 		return res, err
 	}

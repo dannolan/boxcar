@@ -133,67 +133,93 @@ func replaceFile(temporary, output string) error {
 	if err := flushFile(temporary); err != nil {
 		return err
 	}
-	orig, err := os.Stat(output)
-	if err != nil {
-		return err
+	orig, ok := identify(output)
+	if !ok {
+		return errors.New("Cannot replace the NUP: it cannot be opened; the original was kept.")
 	}
-	repl, err := os.Stat(temporary)
-	if err != nil {
-		return err
+	repl, ok := identify(temporary)
+	if !ok {
+		return errors.New("Cannot replace the NUP: the optimized copy cannot be opened; the original was kept.")
 	}
 	backup := output + "." + randomHex() + ".boxcar-backup"
 	callErr := replaceFileW(output, temporary, backup)
 	return settleReplace(output, temporary, backup, orig, repl, callErr)
 }
 
-func settleReplace(output, temporary, backup string, orig, repl os.FileInfo, callErr error) error {
-	stat := func(p string) os.FileInfo {
-		if st, err := os.Stat(p); err == nil {
-			return st
-		}
-		return nil
+// fileKey identifies a file on Windows. (os.SameFile cannot be used here:
+// os.Stat results load their file ID lazily, from whatever is at the path
+// by the time they are compared.)
+type fileKey struct {
+	volume, high, low uint32
+	size              int64
+}
+
+// identify opens path (without blocking other handles) and reads its ID.
+func identify(path string) (fileKey, bool) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return fileKey{}, false
 	}
-	out, tmp, bak := stat(output), stat(temporary), stat(backup)
-	isOrig := func(st os.FileInfo) bool { return st != nil && os.SameFile(st, orig) }
-	// The replacement normally keeps its own file ID; its size identifies
-	// it too, and it must have left its temporary name.
-	isNew := out != nil && !isOrig(out) && tmp == nil &&
-		(os.SameFile(out, repl) || out.Size() == repl.Size())
+	h, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return fileKey{}, false
+	}
+	defer windows.CloseHandle(h)
+	var fi windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &fi); err != nil {
+		return fileKey{}, false
+	}
+	return fileKey{fi.VolumeSerialNumber, fi.FileIndexHigh, fi.FileIndexLow,
+		int64(fi.FileSizeHigh)<<32 | int64(fi.FileSizeLow)}, true
+}
+
+func settleReplace(output, temporary, backup string, orig, repl fileKey, callErr error) error {
+	same := func(a, b fileKey) bool { return a.volume == b.volume && a.high == b.high && a.low == b.low }
+	out, outOK := identify(output)
+	_, tmpOK := identify(temporary)
+	bak, bakOK := identify(backup)
+	outOrig := outOK && same(out, orig)
+	bakOrig := bakOK && same(bak, orig)
+	// The replacement keeps its own file ID (it is renamed into place) and
+	// must have left its temporary name.
+	isNew := outOK && !outOrig && !tmpOK && same(out, repl) && out.size == repl.size
 	cause := "ReplaceFileW reported no error"
 	if callErr != nil {
 		cause = callErr.Error()
 	}
+	kept := func(why string) error {
+		return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s), and %s. "+
+			"The original is kept as %s and the verified optimized copy as %s; nothing was deleted.",
+			cause, why, backup, temporary)}
+	}
 	switch {
 	case isNew:
-		if bak != nil && isOrig(bak) {
+		if bakOrig {
 			_ = os.Remove(backup) // the original is no longer needed; a leftover is harmless
 		}
 		return nil
-	case isOrig(out):
-		if bak != nil && !isOrig(bak) {
+	case outOrig:
+		if bakOK && !bakOrig {
 			_ = os.Remove(backup) // (not the original: nothing of value)
 		}
 		return fmt.Errorf("Cannot replace the NUP (%s); the original was kept.", cause)
-	case out == nil && isOrig(bak):
-		if rerr := restoreBackup(backup, output); rerr == nil && isOrig(stat(output)) {
+	case !outOK && bakOrig:
+		rerr := restoreBackup(backup, output)
+		if back, ok := identify(output); rerr == nil && ok && same(back, orig) {
 			return fmt.Errorf("Cannot replace the NUP (%s); the original was moved back and kept.", cause)
-		} else if rerr == nil {
-			rerr = errors.New("the restored file is not the original")
-			return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s), and restoring it failed (%v). "+
-				"The original is kept as %s and the verified optimized copy as %s; rename one of them to %s.",
-				cause, rerr, backup, temporary, output)}
-		} else {
-			return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s), and restoring it failed (%v). "+
-				"The original is kept as %s and the verified optimized copy as %s; rename one of them to %s.",
-				cause, rerr, backup, temporary, output)}
 		}
+		if rerr == nil {
+			rerr = errors.New("the restored file is not the original")
+		}
+		return kept(fmt.Sprintf("moving the original back failed (%v)", rerr))
 	}
-	where := ""
-	if bak != nil {
-		where = " A copy is kept as " + backup + "."
+	if !bakOK {
+		return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s) and the files are in an unexpected state; "+
+			"nothing was deleted. The verified optimized copy is %s.", cause, temporary)}
 	}
-	return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s) and the files are in an unexpected state; nothing was deleted.%s "+
-		"The verified optimized copy is %s.", cause, where, temporary)}
+	return kept("the files are in an unexpected state")
 }
 
 func flushFile(path string) error {
