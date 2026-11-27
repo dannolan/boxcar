@@ -28,6 +28,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -87,6 +88,7 @@ func main() {
 	only := flag.String("only", "", "comma-separated scenarios to run (default all)")
 	profiles := flag.String("profiles", "runtime,archive,fast", "profiles to run on binaries that have them")
 	jsonOut := flag.String("json", "", "write all runs to this JSON file")
+	warm := flag.Bool("warm", true, "read the input once before each run so every binary starts with the same page cache")
 	var bins, real binFlag
 	flag.Var(&bins, "bin", "label=path of a boxcar binary (repeatable)")
 	flag.Var(&real, "real", "a real .nup to include as its own scenario (repeatable)")
@@ -171,6 +173,9 @@ func main() {
 				must(os.MkdirAll(out, 0o755))
 				r := Run{Scenario: sc.name, Binary: label, Variant: v, InputSize: in}
 				fmt.Fprintf(os.Stderr, "%s / %s / %s\n", sc.name, label, v)
+				if *warm {
+					warmUp(sc.inputs[0])
+				}
 				var m measured
 				target := filepath.Join(out, "o.nup")
 				if sc.folder {
@@ -458,6 +463,19 @@ func inputSize(path string) int64 {
 		return nil
 	})
 	return total
+}
+
+// warmUp reads every file under path once.
+func warmUp(path string) {
+	_ = filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && d.Type().IsRegular() {
+			if f, err := os.Open(p); err == nil {
+				_, _ = io.Copy(io.Discard, f)
+				f.Close()
+			}
+		}
+		return nil
+	})
 }
 
 func pathExists(p string) bool { _, err := os.Stat(p); return err == nil }
