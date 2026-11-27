@@ -282,6 +282,9 @@ func (p *progressPrinter) finished(index, count int, r nuptools.ArchiveResult) {
 		return
 	case "planned":
 		verdict := "would optimize"
+		if r.Action == "measure" {
+			verdict = "would measure"
+		}
 		if r.Action == "skip" {
 			verdict = "would skip"
 		}

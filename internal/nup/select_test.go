@@ -175,6 +175,11 @@ func TestOptimizeMeasureReplacesUncertainSkip(t *testing.T) {
 		t.Fatalf("estimate-based run = %+v", res)
 	}
 	opts.Measure = true
+	opts.DryRun = true
+	if res = optimizeT(t, in, opts); res.Action != "measure" || !strings.Contains(res.Reason, "full temporary rewrite") {
+		t.Fatalf("dry run with Measure = %+v", res)
+	}
+	opts.DryRun = false
 	res = optimizeT(t, in, opts)
 	if res.Status != "skipped" || !strings.Contains(res.Reason, "a full rewrite saved") || pathExists(opts.Output) {
 		t.Fatalf("measured run below the gain = %+v", res)
@@ -273,5 +278,49 @@ func TestOptimizeParallelCancelReleasesBudget(t *testing.T) {
 		if used != 0 {
 			t.Errorf("budget still holds %d after cancellation", used)
 		}
+	}
+}
+
+// TestEstimateAppliesPolicyPerFile: files the estimate has no samples of
+// take the policy-applied outcome of their sampled peers. Here half the
+// files save about 7% (a frame) and half nothing (kept raw): the average
+// ratio of their samples (about 0.965) is above the 5% minimum-savings
+// cut-off, but the expected saving is still about 3.5% of their bytes,
+// which the estimate must report rather than treating every unsampled file
+// as raw.
+func TestEstimateAppliesPolicyPerFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes an archive larger than the sampling budget")
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "mixed.nup")
+	r := rand.New(rand.NewSource(11))
+	var files []nuptest.File
+	for i := 0; i < 640; i++ { // 80 MiB in 128 KiB files: more files than sample windows
+		data := make([]byte, 128<<10)
+		r.Read(data)
+		if i%2 == 0 {
+			clear(data[:9<<10])
+		}
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/f%03d.bin", i), Data: data})
+	}
+	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	opts := defaultOptions()
+	opts.MinSavings = 5
+	opts.MinGain = 0
+	opts.Output = filepath.Join(dir, "out.nup")
+	opts.DryRun = true
+	plan := optimizeT(t, in, opts)
+	if plan.Plan.Exact {
+		t.Fatal("expected a sampled estimate")
+	}
+	opts.DryRun = false
+	res := optimizeT(t, in, opts)
+	est := 100 * float64(plan.SavedBytes) / float64(plan.SizeBefore)
+	got := 100 * float64(res.SavedBytes) / float64(res.SizeBefore)
+	if got < 2 || est < got-1 || est > got+1 {
+		t.Errorf("estimated %.2f%% savings, measured %.2f%%", est, got)
 	}
 }

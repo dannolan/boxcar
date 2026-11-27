@@ -147,9 +147,11 @@ type RepackStats struct {
 // OptimizeResult reports one Optimize call. Status is "optimized" (written,
 // verified and committed, and smaller), "normalized" (written, verified and
 // committed to fix spec deviations, the storage policy or the package set,
-// but not smaller), "skipped" (left alone; see Reason; nothing written) or
-// "planned" (dry run, with Action "optimize" or "skip" saying what a real
-// run would do). Callers add "failed". Verified is true for every
+// but not smaller), "skipped" (left alone, see Reason: nothing replaced or
+// published, although a measured skip wrote and then removed a temporary
+// rewrite) or "planned" (dry run, with Action "optimize", "skip" or
+// "measure" saying what a real run would do; "measure" means a temporary
+// full rewrite decides). Callers add "failed". Verified is true for every
 // committed result.
 type OptimizeResult struct {
 	Input               string       `json:"input"`
@@ -199,6 +201,7 @@ type repacking struct {
 	l          *layout
 	nodes      []nodePlan
 	estimate   map[int]int64
+	expected   map[int]bool // estimates that already average the policy's raw-or-frame choice
 	plan       Plan
 	progress   func(label string, pct float64)
 }
@@ -287,33 +290,35 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	res.Plan = r.plan
 	reason, worthwhile := r.plan.verdict(opts.MinGain, res.ContentChanged, opts.Recompress)
 	res.Reason = reason
+	// An estimate can be wrong both ways, so when a skip verdict rests on a
+	// sampled estimate and Measure is set, a real rewrite measures it (the
+	// commit rule below keeps it only if it saves the minimum gain).
+	need := max64(int64(math.Ceil(float64(r.plan.ArchiveSize)*opts.MinGain/100)), 1)
+	measuring := !worthwhile && !opts.Force && opts.Measure && r.plan.Basis != "exact"
+	// Re-encoding existing frames has no estimate (a frame does not record
+	// its level), so when that is the only reason to rewrite, the real size
+	// decides too: a second --recompress run commits nothing.
+	recompressOnly := worthwhile && opts.Recompress && !opts.Force && !res.ContentChanged &&
+		r.plan.PolicyFixes == 0 && len(r.plan.Deviations) == 0 && r.plan.EstimatedSavings < need
 	if opts.DryRun {
 		res.Status = "planned"
 		res.Action = "skip"
 		if worthwhile || opts.Force {
 			res.Action = "optimize"
 		}
+		if measuring || recompressOnly {
+			res.Action = "measure"
+			res.Reason += fmt.Sprintf("; a real run measures this with a full temporary rewrite and replaces or publishes nothing unless it saves at least %d bytes (%g%%)", need, opts.MinGain)
+		}
 		res.SizeAfter = r.plan.EstimatedSize
 		res.SavedBytes = r.plan.EstimatedSavings
 		report("NUP optimization planned", 100)
 		return res, nil
 	}
-	measuring := false
-	if !worthwhile && !opts.Force {
-		if !opts.Measure || r.plan.Basis == "exact" {
-			return skipped(res, reason, report), nil
-		}
-		measuring = true // the estimate may be wrong: let the real size decide
+	if !worthwhile && !opts.Force && !measuring {
+		return skipped(res, reason, report), nil
 	}
-	// Re-encoding existing frames has no estimate (a frame does not record
-	// its level), so when that is the only reason to rewrite, the real size
-	// decides too: a second --recompress run writes nothing.
-	recompressOnly := worthwhile && opts.Recompress && !opts.Force && !res.ContentChanged &&
-		r.plan.PolicyFixes == 0 && len(r.plan.Deviations) == 0 &&
-		r.plan.EstimatedSavings < max64(int64(math.Ceil(float64(r.plan.ArchiveSize)*opts.MinGain/100)), 1)
-	if recompressOnly {
-		measuring = true
-	}
+	measuring = measuring || recompressOnly
 
 	final := abs
 	mode := os.FileMode(0o666)
@@ -444,7 +449,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	if !fixes && !opts.Force {
 		need := max64(int64(math.Ceil(float64(res.SizeBefore)*opts.MinGain/100)), 1)
 		if res.SavedBytes < need {
-			reason := fmt.Sprintf("already optimized: a full rewrite saved %d bytes (%.2f%%), less than the minimum gain of %d bytes (%g%%); nothing was written",
+			reason := fmt.Sprintf("already optimized: a full rewrite saved %d bytes (%.2f%%), less than the minimum gain of %d bytes (%g%%); the temporary rewrite was discarded and nothing was replaced or published",
 				res.SavedBytes, 100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), need, opts.MinGain)
 			return skipped(res, reason, report), nil
 		}
@@ -831,25 +836,52 @@ func (r *repacking) estimateCompression() {
 			byClass[class(rec)] = &tally{}
 		}
 		count(per[i], length, n)
-		count(byExt[ext(rec)], length, n)
-		count(byClass[class(rec)], length, n)
-		count(&all, length, n)
 		r.progress("Analyzing NUP", 100*float64(s+1)/float64(windows))
+	}
+	// Each sampled file is estimated from its own windows and the storage
+	// policy decides, as the writer will, whether it gets a frame or stays
+	// raw (minimum savings, large-file rule). Files without windows take
+	// the policy-applied outcome of the sampled files of their extension,
+	// else size class, else all: an average of frames and raw files, so it
+	// is used as is rather than passed through the policy a second time.
+	r.expected = map[int]bool{}
+	for _, i := range cands {
+		t := per[i]
+		if t == nil {
+			continue
+		}
+		rec := r.a.files[r.nodes[i].rec]
+		est := int64(math.Ceil(float64(rec.size) * float64(t.packed) / float64(t.raw)))
+		if est > r.policy.maxStored(rec.size) {
+			est = rec.size
+		}
+		r.estimate[i] = est
+		outcome := int64(math.Ceil(float64(t.raw) * float64(est) / float64(max64(rec.size, 1))))
+		if byExt[ext(rec)] == nil {
+			byExt[ext(rec)] = &tally{}
+		}
+		if byClass[class(rec)] == nil {
+			byClass[class(rec)] = &tally{}
+		}
+		count(byExt[ext(rec)], t.raw, outcome)
+		count(byClass[class(rec)], t.raw, outcome)
+		count(&all, t.raw, outcome)
 	}
 	r.plan.SampledBytes = all.raw
 	for _, i := range cands {
-		rec := r.a.files[r.nodes[i].rec]
-		t := per[i]
-		if t == nil {
-			t = byExt[ext(rec)]
+		if per[i] != nil {
+			continue
 		}
+		rec := r.a.files[r.nodes[i].rec]
+		t := byExt[ext(rec)]
 		if t == nil {
 			t = byClass[class(rec)]
 		}
 		if t == nil {
 			t = &all
 		}
-		r.estimate[i] = int64(math.Ceil(float64(rec.size) * float64(t.packed) / float64(t.raw)))
+		r.estimate[i] = min64(rec.size, int64(math.Ceil(float64(rec.size)*float64(t.packed)/float64(t.raw))))
+		r.expected[i] = true
 	}
 }
 
@@ -878,7 +910,7 @@ func (r *repacking) estimateSizes() {
 		case actReuseFrame:
 			est, high = rec.stored, rec.stored
 		case actCompress:
-			if e := r.estimate[i]; e <= r.policy.maxStored(rec.size) {
+			if e := r.estimate[i]; e <= r.policy.maxStored(rec.size) || r.expected[i] {
 				est = e
 			}
 		case actReencode:
