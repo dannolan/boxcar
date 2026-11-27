@@ -93,6 +93,9 @@ type Plan struct {
 	// PolicyFixes counts zstd extents that break the storage policy: above
 	// the large-file threshold, or saving less than the minimum.
 	PolicyFixes int `json:"policy_fixes"`
+	// BetterExtents counts contents built from a later duplicate extent
+	// because it is smaller or satisfies the policy where the first does not.
+	BetterExtents int `json:"better_extents"`
 	// Deviations lists what the source does that the NUP spec or the
 	// reference reader does not allow (see Archive.Deviations); a rewrite
 	// normalizes them.
@@ -155,11 +158,12 @@ const (
 )
 
 type nodePlan struct {
-	rec    int    // input file record
+	own    int    // this file's input record
+	rec    int    // record whose extent supplies the bytes (writer nodes: the best extent; else own)
 	writer int    // node that stores this content; -1 for empty files
 	act    action // how a writer node stores it
-	oldOK  bool   // the input frame satisfies the policy
-	verify bool   // also hash this node's own input extent
+	oldOK  bool   // the supplying frame satisfies the policy
+	verify bool   // also hash this node's own input extent (it is dropped)
 }
 
 type repacking struct {
@@ -439,55 +443,82 @@ func planRepack(ctx context.Context, a *Archive, packages []Package, level int, 
 	p.Packages = len(packages)
 	p.Files = len(r.l.files)
 	p.Deviations = a.Deviations()
-	writers := map[seenKey]int{}
-	covered := map[extentKey]bool{}
+	// Every non-empty content is stored once, at its first file in layout
+	// order (like Pack). Its bytes come from the best of all the extents
+	// that hold it (pickSource); every other extent is still read and
+	// checked against the SHA-256 before it is dropped.
+	type group struct{ nodes []int }
+	groups := map[seenKey]*group{}
+	var order []seenKey
 	for i, f := range r.l.files {
 		binfmt.Check(ctx)
 		src := f.source
 		binfmt.Require(src.archive == a, "Only files of the opened NUP can be repacked.")
 		rec := a.files[src.index]
 		p.ContentBytes += rec.size
-		np := nodePlan{rec: src.index, writer: -1}
-		if rec.size > 0 {
-			key := seenKey{digest: rec.digest, size: rec.size}
-			ext := extentKey{off: rec.off, end: rec.off + rec.stored}
-			if w, ok := writers[key]; ok {
-				np.writer = w
+		r.nodes = append(r.nodes, nodePlan{rec: src.index, own: src.index, writer: -1})
+		if rec.size == 0 {
+			continue
+		}
+		key := seenKey{digest: rec.digest, size: rec.size}
+		g := groups[key]
+		if g == nil {
+			g = &group{}
+			groups[key] = g
+			order = append(order, key)
+		}
+		g.nodes = append(g.nodes, i)
+	}
+	covered := map[extentKey]bool{}
+	extentOf := func(rec fileRecord) extentKey { return extentKey{off: rec.off, end: rec.off + rec.stored} }
+	for _, key := range order {
+		g := groups[key]
+		first := g.nodes[0]
+		best := r.pickSource(g.nodes)
+		bestRec := a.files[best]
+		covered[extentOf(bestRec)] = true
+		np := &r.nodes[first]
+		np.writer = first
+		np.rec = best
+		if best != np.own {
+			p.BetterExtents++
+		}
+		np.act, np.oldOK = r.decide(bestRec)
+		p.UniqueContents++
+		switch np.act {
+		case actReuseFrame:
+			p.ReuseFrames++
+		case actKeepRaw:
+			p.KeepRaw++
+		case actCompress:
+			p.Compress++
+			p.CompressBytes += bestRec.size
+		case actReencode:
+			p.Reencode++
+			if !np.oldOK {
+				p.PolicyFixes++
+			}
+		case actDecode:
+			p.Decode++
+			p.DecodeBytes += bestRec.size
+			p.PolicyFixes++
+		}
+		for _, n := range g.nodes {
+			nd := &r.nodes[n]
+			nd.writer = first
+			if n != first {
 				p.DuplicateFiles++
-				if !covered[ext] {
-					np.verify = true
-					p.RedundantBytes += rec.stored
-					if act, oldOK := r.decide(rec); act == actDecode || act == actReencode && !oldOK {
-						p.PolicyFixes++
-					}
-				}
-			} else {
-				writers[key] = i
-				np.writer = i
-				np.act, np.oldOK = r.decide(rec)
-				p.UniqueContents++
-				switch np.act {
-				case actReuseFrame:
-					p.ReuseFrames++
-				case actKeepRaw:
-					p.KeepRaw++
-				case actCompress:
-					p.Compress++
-					p.CompressBytes += rec.size
-				case actReencode:
-					p.Reencode++
-					if !np.oldOK {
-						p.PolicyFixes++
-					}
-				case actDecode:
-					p.Decode++
-					p.DecodeBytes += rec.size
+			}
+			own := a.files[nd.own]
+			if ext := extentOf(own); !covered[ext] {
+				covered[ext] = true
+				nd.verify = true
+				p.RedundantBytes += own.stored
+				if act, oldOK := r.decide(own); act == actDecode || act == actReencode && !oldOK {
 					p.PolicyFixes++
 				}
 			}
-			covered[ext] = true
 		}
-		r.nodes = append(r.nodes, np)
 	}
 	r.estimateCompression()
 	r.estimateSizes()
@@ -495,6 +526,52 @@ func planRepack(ctx context.Context, a *Archive, packages []Package, level int, 
 		p.Exact = false // re-encoded frames are estimated at their current size
 	}
 	return r
+}
+
+// pickSource chooses, among the records of nodes that hold one content,
+// the extent the output is built from, so that no better existing
+// representation is ever thrown away and nothing is decoded or compressed
+// needlessly:
+//   - files the policy keeps raw: a raw extent (a plain copy), else the
+//     smallest frame (decoded);
+//   - otherwise the smallest frame that satisfies the policy (reused, or the
+//     bar a recompression must beat), else a raw extent (compressed), else
+//     the smallest frame (re-encoded).
+//
+// Ties go to the earliest node, so the choice is deterministic.
+func (r *repacking) pickSource(nodes []int) int {
+	var raw, frame, okFrame = -1, -1, -1
+	for _, n := range nodes {
+		idx := r.nodes[n].own
+		rec := r.a.files[idx]
+		switch {
+		case rec.codec == 0:
+			if raw < 0 {
+				raw = idx
+			}
+		default:
+			if frame < 0 || rec.stored < r.a.files[frame].stored {
+				frame = idx
+			}
+			if rec.stored <= r.policy.maxStored(rec.size) && (okFrame < 0 || rec.stored < r.a.files[okFrame].stored) {
+				okFrame = idx
+			}
+		}
+	}
+	size := r.a.files[r.nodes[nodes[0]].own].size
+	if !r.policy.compress(size) {
+		if raw >= 0 {
+			return raw
+		}
+		return frame
+	}
+	switch {
+	case okFrame >= 0:
+		return okFrame
+	case raw >= 0:
+		return raw
+	}
+	return frame
 }
 
 func (r *repacking) decide(rec fileRecord) (action, bool) {
@@ -793,6 +870,9 @@ func (r *repacking) write(out *os.File, report func(done, total int64)) (stats R
 			src := r.l.files[np.writer]
 			f.off, f.stored, f.codec = src.off, src.stored, src.codec
 		default:
+			if np.verify { // the first copy is dropped for a better extent: check it
+				w.must(w.content(r.a.files[np.own], nil))
+			}
 			start := binfmt.Align(w.out.pos, 16)
 			w.must(writeZeros(out, start-w.out.pos))
 			w.out.pos = start
