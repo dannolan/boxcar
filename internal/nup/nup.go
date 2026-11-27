@@ -32,8 +32,10 @@ const (
 
 const none uint32 = 0xffffffff // sentinel for absent directory index
 
-// Presets maps friendly preset names to the three accepted compression levels.
-var Presets = map[string]int{"Fast": 1, "Balanced": 3, "Smaller": 9}
+// Presets maps friendly preset names to compression levels. Pack accepts
+// Fast, Balanced and Smaller (the reference's 1, 3, 9); the optimizer also
+// accepts Best (SpeedBestCompression).
+var Presets = map[string]int{"Fast": 1, "Balanced": 3, "Smaller": 9, "Best": LevelBest}
 
 var kindNames = []string{"base", "update", "addon", "addon_update", "system"}
 

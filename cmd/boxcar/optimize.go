@@ -54,14 +54,15 @@ func runOptimize(args []string) int {
 	inPlace := fs.Bool("in-place", false, "replace each archive after its rewrite is verified")
 	dryRun := fs.Bool("dry-run", false, "only report what would change; write nothing")
 	recursive := fs.Bool("recursive", false, "also search subfolders")
-	jobs := fs.Int("jobs", 1, "archives optimized at the same time")
-	preset := fs.String("preset", "Balanced", "zstd preset for files that get compressed: Fast, Balanced or Smaller")
-	recompress := fs.Bool("recompress", false, "re-encode already-compressed files with --preset (keeps the smaller result)")
-	largeRaw := fs.Bool("large-files-raw", true, "keep files above --large-file-threshold uncompressed")
+	jobs := fs.Int("jobs", 0, "archives optimized at the same time; 0 picks automatically")
+	profile := fs.String("profile", nup.DefaultProfile, "storage policy: runtime (nx2-flow), archive (smallest) or fast; the flags below override single settings")
+	preset := fs.String("preset", "Balanced", "zstd preset for files that get compressed: Fast, Balanced, Smaller or Best (default: the profile's)")
+	recompress := fs.Bool("recompress", false, "re-encode already-compressed files with --preset (keeps the smaller result; default: the profile's)")
+	largeRaw := fs.Bool("large-files-raw", true, "keep files above --large-file-threshold uncompressed (default: the profile's)")
 	noLargeRaw := fs.Bool("no-large-files-raw", false, "compress large files too")
-	largeThreshold := fs.String("large-file-threshold", "256MiB", "size above which files stay raw (e.g. 64MiB)")
-	minSavings := fs.Float64("min-savings", 0, "store a file raw unless zstd saves at least this percent of it")
-	minGain := fs.Float64("min-gain", 1, "skip archives whose estimated savings are below this percent")
+	largeThreshold := fs.String("large-file-threshold", "128MiB", "size above which files stay raw, e.g. 64MiB (default: the profile's)")
+	minSavings := fs.Float64("min-savings", 5, "store a file raw unless zstd saves at least this percent of it (default: the profile's)")
+	minGain := fs.Float64("min-gain", 1, "skip archives found in folders whose estimated savings are below this percent (archives named explicitly: any saving; default 1)")
 	force := fs.Bool("force", false, "rewrite archives even when they look already optimized")
 	latest := fs.Bool("latest-snapshot", false, "merge base and updates into one runnable game (changes content; opt-in)")
 	noLatest := fs.Bool("no-latest-snapshot", false, "keep every package (default)")
@@ -79,22 +80,52 @@ func runOptimize(args []string) int {
 		rest = fs.Args()[1:]
 	}
 
-	level, ok := nup.Presets[*preset]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "boxcar optimize: unknown preset %q (Fast, Balanced or Smaller)\n", *preset)
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	repack, err := nup.ProfileOptions(*profile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "boxcar optimize: %v\n", err)
 		return 1
 	}
-	threshold, err := parseSize(*largeThreshold)
-	if err != nil || threshold < 1 {
-		fmt.Fprintf(os.Stderr, "boxcar optimize: invalid --large-file-threshold %q\n", *largeThreshold)
-		return 1
+	if set["preset"] {
+		level, ok := nup.Presets[*preset]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "boxcar optimize: unknown preset %q (Fast, Balanced, Smaller or Best)\n", *preset)
+			return 1
+		}
+		repack.Level = level
+	}
+	if set["large-file-threshold"] {
+		threshold, err := parseSize(*largeThreshold)
+		if err != nil || threshold < 1 {
+			fmt.Fprintf(os.Stderr, "boxcar optimize: invalid --large-file-threshold %q\n", *largeThreshold)
+			return 1
+		}
+		repack.LargeFileThreshold = threshold
+		repack.LargeRaw = true
+	}
+	if set["large-files-raw"] {
+		repack.LargeRaw = *largeRaw
+	}
+	if *noLargeRaw {
+		repack.LargeRaw = false
+	}
+	if set["min-savings"] {
+		repack.MinSavings = *minSavings
+	}
+	if set["recompress"] {
+		repack.Recompress = *recompress
+	}
+	gain := -1.0 // per archive: 1% when found in a folder, 0 when named explicitly
+	if set["min-gain"] {
+		gain = *minGain
 	}
 	if *inPlace && *output != "" {
 		fmt.Fprintln(os.Stderr, "boxcar optimize: --in-place and --output are mutually exclusive")
 		return 1
 	}
-	if *jobs < 1 {
-		fmt.Fprintln(os.Stderr, "boxcar optimize: --jobs must be at least 1")
+	if *jobs < 0 {
+		fmt.Fprintln(os.Stderr, "boxcar optimize: --jobs must be 0 (automatic) or more")
 		return 1
 	}
 
@@ -107,20 +138,15 @@ func runOptimize(args []string) int {
 
 	printer := newProgressPrinter()
 	opts := nuptools.OptimizeOptions{
-		RepackOptions: nup.RepackOptions{
-			Level:              level,
-			LargeRaw:           *largeRaw && !*noLargeRaw,
-			LargeFileThreshold: threshold,
-			MinSavings:         *minSavings,
-			Recompress:         *recompress,
-		},
+		RepackOptions:  repack,
+		Profile:        strings.ToLower(*profile),
 		Recursive:      *recursive,
 		Jobs:           *jobs,
 		Output:         *output,
 		InPlace:        *inPlace,
 		DryRun:         *dryRun,
 		Force:          *force,
-		MinGain:        *minGain,
+		MinGain:        gain,
 		LatestSnapshot: *latest && !*noLatest,
 		Progress:       printer.progress,
 		Finished:       printer.finished,
@@ -208,12 +234,12 @@ func (p *progressPrinter) finished(index, count int, r nuptools.ArchiveResult) {
 			100*float64(abs64(saved))/float64(max(before, 1)))
 	}
 	switch r.Status {
-	case "optimized":
+	case "optimized", "normalized":
 		where := "replaced in place"
 		if !r.InPlace {
 			where = "written to " + r.Output
 		}
-		p.println(fmt.Sprintf("%s optimized %s; %s\n    verified; logical SHA-256 %s -> %s", head, change(r.SizeBefore, r.SizeAfter), where,
+		p.println(fmt.Sprintf("%s %s %s; %s\n    verified; logical SHA-256 %s -> %s", head, r.Status, change(r.SizeBefore, r.SizeAfter), where,
 			short(r.LogicalSHA256), short(r.OutputLogicalSHA256)))
 		for _, d := range r.Plan.Deviations {
 			p.println("    normalized: " + d)
@@ -224,8 +250,8 @@ func (p *progressPrinter) finished(index, count int, r nuptools.ArchiveResult) {
 		if r.Action == "skip" {
 			verdict = "would skip"
 		}
-		p.println(fmt.Sprintf("%s %s: %s\n    %s; estimated %s; logical SHA-256 %s", head, verdict, r.Reason,
-			planSummary(r.Plan), change(r.SizeBefore, r.SizeAfter), short(r.LogicalSHA256)))
+		p.println(fmt.Sprintf("%s %s: %s\n    %s; estimated (%s) %s; logical SHA-256 %s", head, verdict, r.Reason,
+			planSummary(r.Plan), strings.ReplaceAll(r.Plan.Basis, "_", " "), change(r.SizeBefore, r.SizeAfter), short(r.LogicalSHA256)))
 	case "skipped":
 		p.println(fmt.Sprintf("%s skipped: %s", head, r.Reason))
 	default:
@@ -258,8 +284,8 @@ func (p *progressPrinter) summary(res nuptools.BatchResult) {
 	if res.DryRun {
 		verb = "would save"
 	}
-	p.println(fmt.Sprintf("%d archive(s): %d optimized, %d skipped, %d planned, %d failed; %s %s of %s (%.1f%%)",
-		s.Archives, s.Optimized, s.Skipped, s.Planned, s.Failed, verb, humanBytes(s.SavedBytes), humanBytes(s.SizeBefore), s.SavedPercent))
+	p.println(fmt.Sprintf("%d archive(s): %d optimized, %d normalized, %d skipped, %d planned, %d failed; %s %s of %s (%.1f%%)",
+		s.Archives, s.Optimized, s.Normalized, s.Skipped, s.Planned, s.Failed, verb, humanBytes(s.SavedBytes), humanBytes(s.SizeBefore), s.SavedPercent))
 }
 
 // short abbreviates a hex digest for progress lines; the JSON has it whole.

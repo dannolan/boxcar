@@ -446,7 +446,8 @@ func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.Re
 // known content size (so the frame verifies content_size == size) and forces
 // single-segment frames for small inputs (EncodeAll path).
 //
-// Level mapping: 1→SpeedFastest, 3→SpeedDefault, 9→SpeedBetterCompression.
+// Level mapping: 1→SpeedFastest, 3→SpeedDefault, 9→SpeedBetterCompression,
+// 19→SpeedBestCompression (optimizer only).
 // Ratios differ from the C zstd backend but the emitted frames are standard
 // and pass the same frame-validation rules.
 func newZstdEncoder(out io.Writer, level int, size int64) (*zstd.Encoder, error) {
@@ -458,6 +459,8 @@ func newZstdEncoder(out io.Writer, level int, size int64) (*zstd.Encoder, error)
 		lvl = zstd.SpeedDefault
 	case 9:
 		lvl = zstd.SpeedBetterCompression
+	case LevelBest:
+		lvl = zstd.SpeedBestCompression
 	default:
 		return nil, fmt.Errorf("unsupported compression level %d", level)
 	}

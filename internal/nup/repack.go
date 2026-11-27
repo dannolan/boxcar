@@ -36,8 +36,8 @@ var emptyDigest = sha256.Sum256(nil)
 
 // RepackOptions controls how Optimize stores each file.
 type RepackOptions struct {
-	// Level is the zstd level for files that are (re)compressed: 1, 3 or 9
-	// (see Presets); 0 means 3.
+	// Level is the zstd level for files that are (re)compressed: 1, 3, 9 or
+	// 19 (see Presets); 0 means 3.
 	Level int
 	// LargeRaw, LargeFileThreshold and MinSavings are the PackOptions
 	// storage policy.
@@ -65,6 +65,12 @@ type OptimizeOptions struct {
 	// MinGain is the estimated saving, in percent of the archive size,
 	// below which an archive counts as already optimized.
 	MinGain float64
+	// Measure turns an uncertain "already optimized" verdict (sampled
+	// estimate, or recompression whose gain is unknown) into a real rewrite
+	// whose measured size decides: the result is kept only if it saves at
+	// least MinGain (at least one byte). Used for archives the user named
+	// explicitly, so sampling cannot cause a false skip.
+	Measure bool
 	// Transform optionally replaces the package set before it is written:
 	// an opt-in, content-altering step such as snapshot consolidation.
 	Transform func(ctx context.Context, packages []Package) ([]Package, error)
@@ -102,11 +108,17 @@ type Plan struct {
 	Deviations []string `json:"deviations,omitempty"`
 	// EstimatedSize is the predicted output size. Exact reports whether
 	// every file planned for compression was trial-compressed in full
-	// rather than sampled.
-	EstimatedSize    int64 `json:"estimated_size"`
-	EstimatedSavings int64 `json:"estimated_savings"`
-	Exact            bool  `json:"exact"`
-	SampledBytes     int64 `json:"sampled_bytes"`
+	// rather than sampled. ExactSavings is the part of the savings known
+	// without any compression estimate (dropped duplicate extents, frames
+	// stored raw by policy); Basis says how far the total can be trusted:
+	// "exact", "estimated" (sampled compression) or "lower_bound" (files to
+	// re-encode are counted at their current size; their gain is unknown).
+	ExactSavings     int64  `json:"exact_savings"`
+	Basis            string `json:"savings_basis"`
+	EstimatedSize    int64  `json:"estimated_size"`
+	EstimatedSavings int64  `json:"estimated_savings"`
+	Exact            bool   `json:"exact"`
+	SampledBytes     int64  `json:"sampled_bytes"`
 	// WorstCaseSize bounds the output size while it is written.
 	WorstCaseSize int64 `json:"worst_case_size"`
 }
@@ -126,9 +138,13 @@ type RepackStats struct {
 	Decompressed   int `json:"decompressed"`
 }
 
-// OptimizeResult reports one Optimize call. Status is "optimized" (written
-// and committed), "skipped" (left alone; see Reason) or "planned" (dry run,
-// with Action "optimize" or "skip" saying what a real run would do).
+// OptimizeResult reports one Optimize call. Status is "optimized" (written,
+// verified and committed, and smaller), "normalized" (written, verified and
+// committed to fix spec deviations, the storage policy or the package set,
+// but not smaller), "skipped" (left alone; see Reason; nothing written) or
+// "planned" (dry run, with Action "optimize" or "skip" saying what a real
+// run would do). Callers add "failed". Verified is true for every
+// committed result.
 type OptimizeResult struct {
 	Input               string       `json:"input"`
 	Output              string       `json:"output,omitempty"`
@@ -198,7 +214,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	if level == 0 {
 		level = 3
 	}
-	binfmt.Require(level == 1 || level == 3 || level == 9, "Choose compression level 1, 3 or 9.")
+	binfmt.Require(validOptimizeLevel(level), "Choose compression level 1, 3, 9 or 19.")
 	policy := newCodecPolicy(opts.LargeRaw, opts.LargeFileThreshold, opts.MinSavings)
 	binfmt.Require(opts.MinGain >= 0 && opts.MinGain < 100, "Minimum gain must be at least 0 and below 100 percent.")
 
@@ -266,8 +282,12 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 		report("NUP optimization planned", 100)
 		return res, nil
 	}
+	measuring := false
 	if !worthwhile && !opts.Force {
-		return skipped(res, reason, report), nil
+		if !opts.Measure || r.plan.Basis == "exact" {
+			return skipped(res, reason, report), nil
+		}
+		measuring = true // the estimate may be wrong: let the real size decide
 	}
 
 	final := abs
@@ -346,8 +366,19 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	res.SavedBytes = res.SizeBefore - res.SizeAfter
 
 	binfmt.Check(ctx)
+	fixes := res.ContentChanged || res.Plan.PolicyFixes > 0 || len(res.Plan.Deviations) > 0
+	if measuring {
+		need := max64(int64(math.Ceil(float64(res.SizeBefore)*opts.MinGain/100)), 1)
+		if res.SavedBytes < need {
+			reason := fmt.Sprintf("already optimized: a full rewrite saved %d bytes (%.2f%%), below the %g%% minimum gain; nothing was written",
+				res.SavedBytes, 100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), opts.MinGain)
+			return skipped(res, reason, report), nil
+		}
+		res.Reason = fmt.Sprintf("measured: a full rewrite saved %.2f%% although the %s estimate was below the minimum gain",
+			100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), r0basis(res.Plan))
+	}
 	if opts.InPlace {
-		if res.SizeAfter >= res.SizeBefore && !res.ContentChanged && res.Plan.PolicyFixes == 0 && len(res.Plan.Deviations) == 0 && !opts.Force {
+		if res.SizeAfter >= res.SizeBefore && !fixes && !opts.Force {
 			reason := fmt.Sprintf("no savings after optimization (the rewrite was %d bytes); the original was kept", res.SizeAfter)
 			return skipped(res, reason, report), nil
 		}
@@ -361,8 +392,18 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	syncDir(filepath.Dir(final))
 	res.Output = final
 	res.Status = "optimized"
+	if res.SavedBytes <= 0 && fixes {
+		res.Status = "normalized"
+	}
 	report("NUP optimized", 100)
 	return res, nil
+}
+
+func r0basis(p Plan) string {
+	if p.Basis == "lower_bound" {
+		return "lower-bound"
+	}
+	return p.Basis
 }
 
 // skipped reports an archive that was left as it is.
@@ -522,8 +563,14 @@ func planRepack(ctx context.Context, a *Archive, packages []Package, level int, 
 	}
 	r.estimateCompression()
 	r.estimateSizes()
-	if p.Reencode > 0 {
+	switch {
+	case p.Reencode > 0:
 		p.Exact = false // re-encoded frames are estimated at their current size
+		p.Basis = "lower_bound"
+	case p.Exact:
+		p.Basis = "exact"
+	default:
+		p.Basis = "estimated"
 	}
 	return r
 }
@@ -750,6 +797,7 @@ func (r *repacking) estimateSizes() {
 	r.plan.EstimatedSize = pos + meta
 	r.plan.WorstCaseSize = worst + meta
 	r.plan.EstimatedSavings = r.plan.ArchiveSize - r.plan.EstimatedSize
+	r.plan.ExactSavings = r.plan.ArchiveSize - r.plan.WorstCaseSize
 }
 
 type countWriter struct{ n int64 }

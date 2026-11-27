@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/dannolan/boxcar/internal/nup/nuptest"
@@ -143,5 +144,43 @@ func TestOptimizeChecksDroppedFirstExtent(t *testing.T) {
 	}
 	if pathExists(opts.Output) {
 		t.Error("output written despite the damaged source")
+	}
+}
+
+// TestOptimizeMeasureReplacesUncertainSkip: with Measure, a skip verdict
+// based on a sampled estimate becomes a real rewrite whose measured size
+// decides; nothing is published when it does not reach the minimum gain.
+func TestOptimizeMeasureReplacesUncertainSkip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("writes an archive larger than the sampling budget")
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "big.nup")
+	chunk := compressibleText(1 << 20)
+	var files []nuptest.File
+	for i := 0; i < 72; i++ { // 72 MiB of candidates: above sampleBudget, so the estimate is sampled
+		data := append([]byte(fmt.Sprintf("%04d", i)), chunk[4:]...)
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/t%02d.txt", i), Data: data})
+	}
+	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	opts := defaultOptions()
+	opts.MinGain = 99.9
+	opts.Output = filepath.Join(dir, "out.nup")
+	res := optimizeT(t, in, opts)
+	if res.Status != "skipped" || res.Plan.Basis != "estimated" {
+		t.Fatalf("estimate-based run = %+v", res)
+	}
+	opts.Measure = true
+	res = optimizeT(t, in, opts)
+	if res.Status != "skipped" || !strings.Contains(res.Reason, "a full rewrite saved") || pathExists(opts.Output) {
+		t.Fatalf("measured run below the gain = %+v", res)
+	}
+	assertNoPartials(t, dir)
+	opts.MinGain = 10
+	res = optimizeT(t, in, opts)
+	if res.Status != "optimized" || !res.Verified || res.SavedBytes <= 0 {
+		t.Fatalf("measured run = %+v", res)
 	}
 }

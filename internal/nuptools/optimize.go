@@ -20,7 +20,10 @@ type OptimizeOptions struct {
 	nup.RepackOptions
 	// Recursive also searches subdirectories of directory inputs.
 	Recursive bool
-	// Jobs is how many archives are optimized at once (minimum 1).
+	// Profile names the profile RepackOptions came from (reported only).
+	Profile string
+	// Jobs is how many archives are optimized at once; 0 chooses
+	// automatically (see autoJobs).
 	Jobs int
 	// Output is a .nup path when exactly one archive is selected, otherwise
 	// a directory that receives the archives under their relative paths.
@@ -29,6 +32,10 @@ type OptimizeOptions struct {
 	InPlace bool
 	DryRun  bool
 	Force   bool
+	// MinGain is the minimum estimated saving in percent. Negative means
+	// automatic: 1% for archives found in folders, any saving for archives
+	// named explicitly. Explicitly named archives are also measured by a
+	// real rewrite when the estimate is uncertain (nup.OptimizeOptions.Measure).
 	MinGain float64
 	// LatestSnapshot consolidates base and updates into one runnable game
 	// (content-altering, so it is opt-in), as pack --latest-snapshot does.
@@ -61,6 +68,7 @@ type ArchiveResult struct {
 type BatchSummary struct {
 	Archives     int     `json:"archives"`
 	Optimized    int     `json:"optimized"`
+	Normalized   int     `json:"normalized"`
 	Skipped      int     `json:"skipped"`
 	Planned      int     `json:"planned"`
 	Failed       int     `json:"failed"`
@@ -70,20 +78,33 @@ type BatchSummary struct {
 	SavedPercent float64 `json:"saved_percent"`
 }
 
+// Policy is the storage policy a run used, after profile and overrides.
+type Policy struct {
+	Profile            string  `json:"profile,omitempty"`
+	Level              int     `json:"level"`
+	LargeFilesRaw      bool    `json:"large_files_raw"`
+	LargeFileThreshold int64   `json:"large_file_threshold"`
+	MinSavings         float64 `json:"min_savings"`
+	Recompress         bool    `json:"recompress"`
+	Jobs               int     `json:"jobs"`
+}
+
 // BatchResult is the outcome of Optimize.
 type BatchResult struct {
 	DryRun   bool            `json:"dry_run"`
 	InPlace  bool            `json:"in_place"`
+	Policy   Policy          `json:"policy"`
 	Archives []ArchiveResult `json:"archives"`
 	Summary  BatchSummary    `json:"summary"`
 }
 
 type optimizeTarget struct {
-	path   string
-	rel    string
-	output string
-	size   int64
-	err    error
+	explicit bool // named on the command line rather than found in a folder
+	path     string
+	rel      string
+	output   string
+	size     int64
+	err      error
 }
 
 // Optimize optimizes every NUP named by inputs (files, or directories
@@ -106,8 +127,21 @@ func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (Batch
 		return result, err
 	}
 
-	jobs := max(opts.Jobs, 1)
-	jobs = min(jobs, len(targets))
+	jobs := opts.Jobs
+	if jobs <= 0 {
+		jobs = autoJobs(targets, opts)
+	}
+	jobs = max(min(jobs, len(targets)), 1)
+	threshold := opts.LargeFileThreshold
+	if threshold == 0 {
+		threshold = nup.LargeFile
+	}
+	level := opts.Level
+	if level == 0 {
+		level = 3
+	}
+	result.Policy = Policy{Profile: opts.Profile, Level: level, LargeFilesRaw: opts.LargeRaw, LargeFileThreshold: threshold,
+		MinSavings: opts.MinSavings, Recompress: opts.Recompress, Jobs: jobs}
 	var total int64
 	for _, t := range targets {
 		total += t.size
@@ -142,6 +176,13 @@ func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (Batch
 				DryRun:        opts.DryRun,
 				Force:         opts.Force,
 				MinGain:       opts.MinGain,
+				Measure:       t.explicit,
+			}
+			if o.MinGain < 0 {
+				o.MinGain = 1
+				if t.explicit {
+					o.MinGain = 0
+				}
 			}
 			o.Progress = func(label string, pct float64) {
 				mu.Lock()
@@ -197,6 +238,8 @@ func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (Batch
 		switch r.Status {
 		case "optimized":
 			s.Optimized++
+		case "normalized":
+			s.Normalized++
 		case "skipped":
 			s.Skipped++
 		case "planned":
@@ -232,12 +275,12 @@ func findArchives(inputs []string, recursive bool, outputDir string) ([]optimize
 		return nil, errors.New("Choose at least one .nup file or folder.")
 	}
 	var targets []optimizeTarget
-	seen := map[string]bool{}
-	add := func(path, rel string, err error) {
-		if seen[path] {
-			return
+	seen := map[string]int{}
+	add := func(path, rel string, err error) int {
+		if i, ok := seen[path]; ok {
+			return i
 		}
-		seen[path] = true
+		seen[path] = len(targets)
 		t := optimizeTarget{path: path, rel: rel, err: err}
 		if err == nil {
 			if st, serr := os.Stat(path); serr == nil {
@@ -245,6 +288,7 @@ func findArchives(inputs []string, recursive bool, outputDir string) ([]optimize
 			}
 		}
 		targets = append(targets, t)
+		return len(targets) - 1
 	}
 	isNup := func(name string) bool { return strings.EqualFold(filepath.Ext(name), ".nup") }
 	linkErr := errors.New("Linked input files are not supported.")
@@ -262,7 +306,7 @@ func findArchives(inputs []string, recursive bool, outputDir string) ([]optimize
 		case st.Mode()&os.ModeSymlink != 0 || isLinked(abs):
 			add(abs, filepath.Base(abs), linkErr)
 		case !st.IsDir():
-			add(abs, filepath.Base(abs), nil)
+			targets[add(abs, filepath.Base(abs), nil)].explicit = true
 		case isNup(abs):
 			add(abs, filepath.Base(abs), splitErr)
 		case recursive:
@@ -328,6 +372,12 @@ func sameDir(a, b string) bool {
 	sa, err1 := os.Stat(a)
 	sb, err2 := os.Stat(b)
 	return err1 == nil && err2 == nil && os.SameFile(sa, sb)
+}
+
+// autoJobs picks how many archives run at once when --jobs is 0. See
+// docs/OPTIMIZE.md "Concurrency" for the measurements behind it.
+func autoJobs(targets []optimizeTarget, opts OptimizeOptions) int {
+	return 1
 }
 
 // assignOutputs maps each target to its output path.

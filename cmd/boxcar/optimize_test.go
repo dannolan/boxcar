@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math/rand"
 	"os"
@@ -170,7 +171,8 @@ func TestOptimizeCommandErrors(t *testing.T) {
 		{"optimize", in, "--in-place", "--output", filepath.Join(dir, "x.nup")},
 		{"optimize", in, "--dry-run", "--preset", "Huge"},
 		{"optimize", in, "--dry-run", "--large-file-threshold", "big"},
-		{"optimize", in, "--dry-run", "--jobs", "0"},
+		{"optimize", in, "--dry-run", "--jobs", "-1"},
+		{"optimize", in, "--dry-run", "--profile", "tiny"},
 		{"optimize", dir, "--dry-run"},
 	} {
 		if code := run(args); code != 1 {
@@ -304,5 +306,55 @@ func TestOptimizeInterrupt(t *testing.T) {
 	}
 	if p := partials(t, dir); len(p) != 0 {
 		t.Errorf("partial files after an interrupt: %v", p)
+	}
+}
+
+// TestOptimizeProfiles: --profile selects the storage policy, single flags
+// override it, and the JSON reports the policy that was used.
+func TestOptimizeProfiles(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "game.nup")
+	writeDump(t, in, 0)
+	cases := []struct {
+		args      []string
+		level     int
+		raw       bool
+		threshold int64
+		savings   float64
+		recompr   bool
+	}{
+		{nil, 3, true, 128 << 20, 5, false},
+		{[]string{"--profile", "archive"}, 19, false, 256 << 20, 0, true},
+		{[]string{"--profile", "Fast"}, 1, true, 256 << 20, 0, false},
+		{[]string{"--profile", "archive", "--preset", "Balanced", "--recompress=false"}, 3, false, 256 << 20, 0, false},
+		{[]string{"--min-savings", "0", "--large-file-threshold", "32MiB"}, 3, true, 32 << 20, 0, false},
+		{[]string{"--no-large-files-raw"}, 3, false, 128 << 20, 5, false},
+	}
+	for i, c := range cases {
+		report := filepath.Join(dir, fmt.Sprintf("r%d.json", i))
+		args := append([]string{"optimize", in, "--dry-run", "--result-json", report}, c.args...)
+		if code := run(args); code != 0 {
+			t.Fatalf("%v = %d", c.args, code)
+		}
+		data, err := os.ReadFile(report)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var res struct {
+			Policy struct {
+				Level      int     `json:"level"`
+				Raw        bool    `json:"large_files_raw"`
+				Threshold  int64   `json:"large_file_threshold"`
+				MinSavings float64 `json:"min_savings"`
+				Recompress bool    `json:"recompress"`
+			}
+		}
+		if err := json.Unmarshal(data, &res); err != nil {
+			t.Fatal(err)
+		}
+		p := res.Policy
+		if p.Level != c.level || p.Raw != c.raw || p.Threshold != c.threshold || p.MinSavings != c.savings || p.Recompress != c.recompr {
+			t.Errorf("%v: policy = %+v", c.args, p)
+		}
 	}
 }

@@ -346,7 +346,7 @@ func TestOptimizeLargeFilePolicy(t *testing.T) {
 	opts.LargeFileThreshold = 100 << 10
 	opts.InPlace = true
 	res := optimizeT(t, in, opts)
-	if res.Status != "optimized" || res.Plan.Decode != 1 || res.Plan.PolicyFixes != 1 || res.Stats.Decompressed != 1 {
+	if res.Status != "normalized" || res.Plan.Decode != 1 || res.Plan.PolicyFixes != 1 || res.Stats.Decompressed != 1 {
 		t.Fatalf("result = %+v stats %+v", res, res.Stats)
 	}
 	if res.SizeAfter <= res.SizeBefore {
@@ -383,7 +383,7 @@ func TestOptimizeMinSavings(t *testing.T) {
 	opts.MinSavings = 10
 	opts.Output = filepath.Join(dir, "out.nup")
 	res := optimizeT(t, in, opts)
-	if res.Status != "optimized" || res.Plan.PolicyFixes != 1 || res.Stats.Decompressed != 1 {
+	if res.Status != "normalized" || res.Plan.PolicyFixes != 1 || res.Stats.Decompressed != 1 {
 		t.Fatalf("result = %+v stats %+v", res, res.Stats)
 	}
 	if codec(t, codecs(t, opts.Output), "romfs/little") != 0 {
@@ -555,7 +555,7 @@ func TestOptimizeNormalizesDeviations(t *testing.T) {
 		t.Fatalf("dry run = %+v", res)
 	}
 	opts.DryRun = false
-	if res = optimizeT(t, in, opts); res.Status != "optimized" {
+	if res = optimizeT(t, in, opts); res.Status != "normalized" || !res.Verified {
 		t.Fatalf("result = %+v", res)
 	}
 	if d := openT(t, in).Deviations(); len(d) != 0 {
