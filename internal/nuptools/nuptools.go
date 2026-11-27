@@ -21,6 +21,7 @@
 //	func BuildSnapshotNSP(ctx context.Context, pkg nup.Package, output string, verify bool, progress binfmt.Progress) (result map[string]any, err error)
 //	func NupToNsp(ctx context.Context, path, output string, selection int, verify bool, includeKinds []int, progress binfmt.Progress) (map[string]any, error)
 //	func InspectNup(ctx context.Context, path string, verify bool, progress binfmt.Progress) (map[string]any, error)
+//	func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (BatchResult, error)
 //
 // Deviations from the Python reference:
 //   - NSP->NUP conversion materializes region-backed files into temporary

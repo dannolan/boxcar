@@ -130,7 +130,17 @@ boxcar nup --nup-operation inspect    --input bundle.nup
 boxcar nup --nup-operation verify     --input bundle.nup
 ```
 
-Presets: `Fast` (level 1), `Balanced` (3), `Smaller` (9). Identical files share one extent; files > 256 MiB stay raw unless you say otherwise.
+Presets: `Fast` (level 1), `Balanced` (3), `Smaller` (9). Identical files share one extent; files > 256 MiB stay raw unless you say otherwise (`--no-large-files-raw`, or another `--large-file-threshold`); `--min-savings PCT` keeps a file raw unless zstd saves at least that share of it.
+
+### Optimize existing NUPs (KaiDump backups, nx2-flow libraries)
+
+```bash
+boxcar optimize game.nup --dry-run                  # preview; writes nothing
+boxcar optimize game.nup --output game.small.nup    # new, verified copy; original untouched
+boxcar optimize ./games --recursive --in-place      # replace originals after verification
+```
+
+Rewrites archives without extracting them: reuses existing zstd frames, compresses raw files, stores identical files once (from the best of their copies) and applies a storage profile: `runtime` (default, for nx2-flow: files over 128 MiB raw, 5% minimum saving per file), `archive` (smallest, zstd 19) or `fast` (`runtime`'s policy at the fastest level). Every rewrite is verified (each file's SHA-256 plus a logical-content comparison) before it is committed, and originals are replaced only with `--in-place`. Archives kept in parts for FAT32 cards (`Game.nup.001`, ...) are read directly and written with `--split` (automatic on FAT volumes). Compression and verification use every CPU. Equivalent to `boxcar nup --nup-operation optimize --input …`. Workflows for KaiDump backups and nx2-flow, all flags, benchmarks and how to test on a real archive: [docs/OPTIMIZE.md](docs/OPTIMIZE.md).
 
 ### Emulator patch (reversible, offline)
 
@@ -160,6 +170,7 @@ Port correctness is enforced by golden cross-validation against the Python origi
 - ✅ Emulator patch `transform()` **byte-identical** for all four profile kinds (+ legacy revision)
 - ✅ NUP archives **cross-verify in both directions** (Go reads Python archives, Python reads Go archives)
 - ✅ NSP → NUP → NSP round trip **byte-identical**
+- ✅ Optimized NUPs verify and extract with the Python reference, including reused frames and rewritten KaiDump archives
 
 Known deviations: artwork input formats are PNG/JPEG/GIF/BMP/TIFF/WEBP (no AVIF/ICNS/JPEG2000 in pure Go); NUP zstd levels map to Go's klauspost speed tiers, so compressed sizes differ slightly (format stays cross-compatible); NSP→NUP conversion materializes region-backed files to temp files instead of mmap streaming. Full list: [ARCHITECTURE.md](ARCHITECTURE.md) § Deviations.
 

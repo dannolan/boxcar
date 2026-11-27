@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dannolan/boxcar/internal/binfmt"
 	"github.com/klauspost/compress/zstd"
@@ -22,6 +24,7 @@ type fileRecord struct {
 	stored int64
 	digest [32]byte
 	codec  int
+	window int64 // the zstd frame's decoder window (codec 1)
 }
 
 type dirRecord struct {
@@ -33,6 +36,8 @@ type dirRecord struct {
 type archiveStamp struct {
 	size  int64
 	mtime int64
+	info  os.FileInfo // identity of the file that was opened (nil for an archive in parts)
+	parts []partStamp // every file read, in order (one for a whole file)
 }
 
 type extentKey struct{ off, end int64 }
@@ -53,21 +58,60 @@ type verifyKey struct {
 // Archive is an opened, parsed NUP v1 archive.
 type Archive struct {
 	path     string
-	f        *os.File
+	f        archiveFile
 	stamp    archiveStamp
 	packages []Package
 	files    []fileRecord
 	dirs     []dirRecord
 	trees    []map[string]int
 	stats    Stats
+
+	headerSize, headerVersion int
+	records                   [][3]uint32 // root, exefs, romfs per package
+	metaRaw                   [][]byte    // metadata blocks as stored
+
+	// Tolerated deviations (ARCHITECTURE.md § Deviations 7 and 8).
+	metaBeforeBlob, emptyOffsets int
 }
 
-// Open parses a NUP archive (port of nup_format.Archive.__init__).
+type archiveFile interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// Open parses a NUP archive (port of nup_format.Archive.__init__). path is
+// a whole file, the first part of an archive in parts, or a folder holding
+// one archive's parts (see FindParts).
 func Open(ctx context.Context, path string) (a *Archive, err error) {
-	defer binfmt.Recover(&err)
-	f, err := os.Open(path)
+	parts, _, err := FindParts(path)
 	if err != nil {
 		return nil, err
+	}
+	return openParts(ctx, path, parts)
+}
+
+// openParts parses the archive made of parts, read in order as one file.
+func openParts(ctx context.Context, path string, parts []string) (a *Archive, err error) {
+	defer binfmt.Recover(&err)
+	var f archiveFile
+	var stamps []partStamp
+	if len(parts) == 1 {
+		file, err := os.Open(parts[0])
+		if err != nil {
+			return nil, err
+		}
+		st, err := file.Stat()
+		if err != nil {
+			file.Close()
+			return nil, err
+		}
+		f, stamps = file, []partStamp{{path: parts[0], size: st.Size(), mtime: st.ModTime().UnixNano(), info: st}}
+	} else {
+		r, st, err := openPartsReader(parts)
+		if err != nil {
+			return nil, err
+		}
+		f, stamps = r, st
 	}
 	success := false
 	defer func() {
@@ -76,14 +120,25 @@ func Open(ctx context.Context, path string) (a *Archive, err error) {
 		}
 	}()
 	a = &Archive{path: path, f: f}
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
+	a.stamp = archiveStamp{parts: stamps}
+	for _, p := range stamps {
+		a.stamp.size += p.size
 	}
-	a.stamp = archiveStamp{size: st.Size(), mtime: st.ModTime().UnixNano()}
+	if len(stamps) == 1 {
+		a.stamp.mtime, a.stamp.info = stamps[0].mtime, stamps[0].info
+	}
 	a.parse(ctx)
 	success = true
 	return a, nil
+}
+
+// Parts lists the files the archive was read from, in order.
+func (a *Archive) Parts() []string {
+	out := make([]string, len(a.stamp.parts))
+	for i, p := range a.stamp.parts {
+		out[i] = p.path
+	}
+	return out
 }
 
 // Close releases the archive file handle.
@@ -99,6 +154,22 @@ func (a *Archive) Close() error {
 // Packages returns the parsed package set.
 func (a *Archive) Packages() []Package { return a.packages }
 
+// Deviations describes what this archive does that Boxcar accepts but the
+// NUP spec or the reference reader does not; empty for compliant archives.
+// Rewriting the archive (Pack, Optimize) removes them.
+func (a *Archive) Deviations() []string {
+	var out []string
+	if a.emptyOffsets > 0 {
+		out = append(out, fmt.Sprintf("%d empty file(s) have a nonzero extent offset (written by KaiDump); "+
+			"the NUP spec requires 0 and strict readers reject the archive", a.emptyOffsets))
+	}
+	if a.metaBeforeBlob > 0 {
+		out = append(out, fmt.Sprintf("metadata of %d package(s) lies before the blob region, "+
+			"which the NSP-Box reader rejects", a.metaBeforeBlob))
+	}
+	return out
+}
+
 func (a *Archive) readAt(off, size int64) []byte {
 	binfmt.Require(off >= 0 && off <= a.stamp.size && size >= 0 && size <= a.stamp.size-off, "Archive offset is out of bounds.")
 	buf := make([]byte, size)
@@ -111,12 +182,14 @@ func (a *Archive) readAt(off, size int64) []byte {
 }
 
 func (a *Archive) unchanged() error {
-	st, err := os.Stat(a.path)
-	if err != nil {
-		return err
-	}
-	if st.Size() != a.stamp.size || st.ModTime().UnixNano() != a.stamp.mtime {
-		return errors.New("NUP changed while reading.")
+	for _, p := range a.stamp.parts {
+		st, err := os.Stat(p.path)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(st, p.info) || st.Size() != p.size || st.ModTime().UnixNano() != p.mtime {
+			return errors.New("NUP changed while reading.")
+		}
 	}
 	return nil
 }
@@ -157,6 +230,7 @@ func (a *Archive) parse(ctx context.Context) {
 	binfmt.Require(flags == 0 && allZero(res) && fs == a.stamp.size && bo%16 == 0 && fs >= bo && bo >= to+ts && pc > 0 && pc <= 4096,
 		"Invalid NUP superblock.")
 	binfmt.Require(int64(48) <= ts && ts <= 256*1024*1024, "Invalid or excessive NUP table size.")
+	a.headerSize, a.headerVersion = hs, hv
 
 	toc := a.readAt(to, ts)
 	binfmt.Require(bytes.Equal(binfmt.SHA256Sum(toc), th), "NUP table SHA-256 mismatch.")
@@ -215,6 +289,7 @@ func (a *Archive) parse(ctx context.Context) {
 		binfmt.Require((mo == 0) == (ms == 0), "Invalid metadata extent.")
 		binfmt.Require(ms <= 32*1024*1024, "Package metadata exceeds 32 MiB.")
 		var metadata []TLV
+		var raw []byte
 		if ms != 0 {
 			// Metadata may live anywhere in the file as long as it stays
 			// in-bounds and does not overlap other extents (checked below).
@@ -223,9 +298,13 @@ func (a *Archive) parse(ctx context.Context) {
 			// metadata in the TOC-to-blob gap (observed in the wild); we
 			// accept them. Documented deviation — see ARCHITECTURE.md.
 			binfmt.Require(mo <= uint64(fs) && ms <= uint64(fs)-mo, "Invalid package metadata bounds.")
+			if mo < uint64(bo) {
+				a.metaBeforeBlob++
+			}
 			regions = append(regions, [2]int64{int64(mo), int64(mo) + int64(ms)})
 			var err error
-			metadata, err = parseTlvs(a.readAt(int64(mo), int64(ms)))
+			raw = a.readAt(int64(mo), int64(ms))
+			metadata, err = parseTlvs(raw)
 			if err != nil {
 				binfmt.Fail("%v", err)
 			}
@@ -235,7 +314,9 @@ func (a *Archive) parse(ctx context.Context) {
 			Files: map[string]*Source{}, Metadata: metadata,
 		})
 		records = append(records, [3]uint32{root, ex, rom})
+		a.metaRaw = append(a.metaRaw, raw)
 	}
+	a.records = records
 
 	validatePackages(a.packages)
 
@@ -280,8 +361,15 @@ func (a *Archive) parse(ctx context.Context) {
 		at += 80
 
 		binfmt.Require((codec == 0 || codec == 1) && cf == 0 && r == 0 && allZero(r3), "Unknown codec or file flags.")
+		var window int64
 		if size == 0 {
-			binfmt.Require(off == 0 && stored == 0 && codec == 0, "Invalid empty-file extent.")
+			// The reference also requires off == 0. KaiDump records the blob
+			// cursor as an empty file's offset; nothing is read from it, so
+			// any offset is accepted. Documented deviation — see ARCHITECTURE.md.
+			binfmt.Require(stored == 0 && codec == 0, "Invalid empty-file extent.")
+			if off != 0 {
+				a.emptyOffsets++
+			}
 		} else {
 			binfmt.Require(uint64(bo) <= off && off%16 == 0 && stored > 0 && off <= uint64(fs) && stored <= uint64(fs)-off,
 				"File extent out of bounds.")
@@ -305,6 +393,7 @@ func (a *Archive) parse(ctx context.Context) {
 				}
 				binfmt.Require(params.contentSize == sizeI && params.dictID == 0, "Zstandard frame size/dictionary is unsupported.")
 				binfmt.Require(params.windowSize <= MaxWindow, "Zstandard frame requires a decoder window larger than 1 GiB.")
+				window = params.windowSize
 				cursor := offI + int64(params.headerSize)
 				for {
 					binfmt.Check(ctx)
@@ -332,7 +421,7 @@ func (a *Archive) parse(ctx context.Context) {
 				binfmt.Require(cursor == offI+storedI, "NUP extent must contain exactly one Zstandard frame.")
 			}
 		}
-		a.files = append(a.files, fileRecord{name: name(no, nl, false), size: int64(size), off: int64(off), stored: int64(stored), digest: to32(digestBytes), codec: int(codec)})
+		a.files = append(a.files, fileRecord{name: name(no, nl, false), size: int64(size), off: int64(off), stored: int64(stored), digest: to32(digestBytes), codec: int(codec), window: window})
 	}
 
 	sort.Slice(regions, func(i, j int) bool {
@@ -412,6 +501,13 @@ func (a *Archive) parse(ctx context.Context) {
 			p.Directories = append(p.Directories, d)
 		}
 		sort.Strings(p.Directories)
+		p.rootName = a.dirs[root].name
+		if ex == none && directories["exefs"] {
+			p.unsetDirs |= 1
+		}
+		if rom == none && directories["romfs"] {
+			p.unsetDirs |= 2
+		}
 		for path, index := range paths {
 			idx := index
 			p.Files[path] = &Source{
@@ -420,6 +516,8 @@ func (a *Archive) parse(ctx context.Context) {
 					return a.openFile(idx)
 				},
 				validator: func() error { return a.unchanged() },
+				archive:   a,
+				index:     idx,
 			}
 		}
 		a.trees = append(a.trees, paths)
@@ -498,18 +596,52 @@ func (a *Archive) openFile(index int) (io.ReadCloser, error) {
 	return sr, nil
 }
 
-// streamFile decompresses file index, hashes it, and streams it to w (nil
-// discards), invoking perChunk after each output chunk.
-func (a *Archive) streamFile(ctx context.Context, index int, w io.Writer, perChunk func(n int)) error {
-	rec := a.files[index]
-	src, err := a.openFile(index)
-	if err != nil {
-		return err
+// streamer is the read buffer and zstd decoder streamFile reuses from one
+// file to the next; archives hold tens of thousands of small files.
+type streamer struct {
+	buf []byte
+	dec *zstd.Decoder
+}
+
+func (s *streamer) Close() {
+	if s.dec != nil {
+		s.dec.Close()
 	}
-	defer src.Close()
+}
+
+// streamFile decompresses file index, hashes it, and streams it to w (nil
+// discards), invoking perChunk after each output chunk. It reads through the
+// archive's own handle with positioned reads (safe from several goroutines);
+// a file replaced meanwhile is caught by unchanged().
+func (a *Archive) streamFile(ctx context.Context, s *streamer, index int, w io.Writer, perChunk func(n int)) error {
+	rec := a.files[index]
+	var src io.Reader = io.NewSectionReader(a.f, rec.off, rec.stored)
+	if rec.codec == 1 {
+		if s.dec == nil {
+			dec, err := zstd.NewReader(nil,
+				zstd.WithDecoderMaxWindow(MaxWindow),
+				zstd.WithDecoderConcurrency(1),
+			)
+			if err != nil {
+				return err
+			}
+			s.dec = dec
+		}
+		if err := s.dec.Reset(src); err != nil {
+			// A failed Reset leaves the decoder in an unknown state; drop it
+			// so the next file gets a fresh one.
+			s.dec.Close()
+			s.dec = nil
+			return err
+		}
+		src = s.dec
+	}
+	if s.buf == nil {
+		s.buf = make([]byte, Block)
+	}
+	buf := s.buf
 	h := sha256.New()
 	var count int64
-	buf := make([]byte, Block)
 	for {
 		binfmt.Check(ctx)
 		n, rerr := src.Read(buf)
@@ -541,7 +673,9 @@ func (a *Archive) streamFile(ctx context.Context, index int, w io.Writer, perChu
 func (a *Archive) FileChunks(ctx context.Context, index int, w io.Writer) (err error) {
 	defer binfmt.Recover(&err)
 	binfmt.Require(index >= 0 && index < len(a.files), "Invalid file index.")
-	return a.streamFile(ctx, index, w, nil)
+	s := &streamer{}
+	defer s.Close()
+	return a.streamFile(ctx, s, index, w, nil)
 }
 
 // Verify re-hashes every unique extent and returns the stats (port of
@@ -549,32 +683,96 @@ func (a *Archive) FileChunks(ctx context.Context, index int, w io.Writer) (err e
 func (a *Archive) Verify(ctx context.Context, progress binfmt.Progress) (stats Stats, err error) {
 	defer binfmt.Recover(&err)
 	total := a.stats["uncompressed"].(int64)
-	var done int64
+	// Each distinct extent is checked once; files sharing it count as done.
+	var todo []int
 	verified := map[verifyKey]bool{}
-	for i := range a.files {
-		binfmt.Check(ctx)
-		f := a.files[i]
+	var done int64
+	for i, f := range a.files {
 		key := verifyKey{size: f.size, off: f.off, stored: f.stored, digest: f.digest, codec: f.codec}
-		report := func() {
-			if progress != nil {
-				progress("Verifying NUP files", 100*float64(done)/float64(max64(total, 1)))
-			}
-		}
 		if verified[key] {
 			done += f.size
-		} else {
-			if err := a.streamFile(ctx, i, nil, func(n int) {
-				done += int64(n)
-				if progress != nil {
-					progress("Verifying NUP files", 100*float64(done)/float64(max64(total, 1)))
-				}
-			}); err != nil {
-				return nil, err
-			}
-			verified[key] = true
+			continue
 		}
-		report()
+		verified[key] = true
+		todo = append(todo, i)
 	}
+	// Extents are hashed by up to one worker per CPU, sharing the process-
+	// wide CPU tokens with the optimizer. Of the failures found before the
+	// others stop, the one earliest in file order is reported.
+	var mu sync.Mutex
+	report := func(n int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		done += n
+		if progress != nil {
+			progress("Verifying NUP files", 100*float64(done)/float64(max64(total, 1)))
+		}
+	}
+	vctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	next := make(chan int)
+	failAt, failErr := len(a.files), error(nil)
+	var wg sync.WaitGroup
+	// Each worker keeps a decoder (for the largest window it may meet) and
+	// a read buffer, reserved from the working-memory budget.
+	var window int64
+	for _, i := range todo {
+		if a.files[i].codec == 1 {
+			window = max64(window, a.files[i].window)
+		}
+	}
+	perWorker := int64(Block)
+	if window > 0 {
+		perWorker += decoderCost(window)
+	}
+	workers, _, reserved, rerr := memBudget.reserveFlexible(ctx, 0, perWorker,
+		min(runtime.GOMAXPROCS(0), max(len(todo), 1)), 0, 0)
+	if rerr != nil {
+		binfmt.Check(ctx)
+		return nil, rerr
+	}
+	defer memBudget.release(reserved)
+	for k := 0; k < workers; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := &streamer{}
+			defer s.Close()
+			for i := range next {
+				err := cpuTokens.acquire(vctx, 1)
+				if err == nil {
+					err = func() (err error) {
+						defer binfmt.Recover(&err)
+						return a.streamFile(vctx, s, i, nil, func(n int) { report(int64(n)) })
+					}()
+					cpuTokens.release(1)
+				}
+				if err != nil {
+					mu.Lock()
+					if i < failAt && !(errors.Is(err, context.Canceled) && ctx.Err() == nil) {
+						failAt, failErr = i, err
+					}
+					mu.Unlock()
+					cancel()
+				}
+			}
+		}()
+	}
+feed:
+	for _, i := range todo {
+		select {
+		case next <- i:
+		case <-vctx.Done():
+			break feed
+		}
+	}
+	close(next)
+	wg.Wait()
+	binfmt.Check(ctx)
+	if failErr != nil {
+		return nil, failErr
+	}
+	report(0)
 	if err := a.unchanged(); err != nil {
 		return nil, err
 	}

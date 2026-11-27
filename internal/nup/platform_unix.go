@@ -24,15 +24,6 @@ func lstatSource(path string) (size, mtime, ctime, ino int64, linked bool, err e
 	return size, mtime, ctime, ino, linked, nil
 }
 
-// commitFile moves temporary onto output without overwriting (port of
-// nup_format.commit_file's POSIX branch: os.link + unlink).
-func commitFile(temporary, output string) error {
-	if err := os.Link(temporary, output); err != nil {
-		return err
-	}
-	return os.Remove(temporary)
-}
-
 // isLinked reports whether path is a symlink (Python linked() on POSIX).
 func isLinked(path string) bool {
 	fi, err := os.Lstat(path)

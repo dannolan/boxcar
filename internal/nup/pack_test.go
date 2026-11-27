@@ -90,6 +90,118 @@ func TestRawFallback(t *testing.T) {
 	}
 }
 
+// codecs returns path -> codec for the files of the first package of path.
+func codecs(t *testing.T, path string) map[string]int {
+	t.Helper()
+	a, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer a.Close()
+	if _, err := a.Verify(context.Background(), nil); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	out := map[string]int{}
+	for p, idx := range a.trees[0] {
+		out[p] = a.files[idx].codec
+	}
+	return out
+}
+
+// codec returns the codec of path, failing the test when it is missing.
+func codec(t *testing.T, codecs map[string]int, path string) int {
+	t.Helper()
+	c, ok := codecs[path]
+	if !ok {
+		t.Fatalf("%s missing from the archive: %v", path, codecs)
+	}
+	return c
+}
+
+// partlyRandom returns size bytes of which roughly zeroPercent are zeros, so
+// zstd saves a little less than that share.
+func partlyRandom(t *testing.T, size, zeroPercent int) []byte {
+	t.Helper()
+	data := make([]byte, size)
+	if _, err := rand.Read(data[:size-size*zeroPercent/100]); err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestLargeFileThreshold(t *testing.T) {
+	ctx := context.Background()
+	text := bytes.Repeat([]byte("compressible "), 20000) // 260 KB
+	pkg := func() []Package {
+		return []Package{{TitleID: testTID, Kind: 0, Files: map[string]*Source{
+			"romfs/big.txt":   SourceData(text),
+			"romfs/small.txt": SourceData(text[:50000]),
+		}}}
+	}
+	cases := []struct {
+		name      string
+		largeRaw  bool
+		threshold int64
+		big       int
+	}{
+		{"default threshold", true, 0, 1},
+		{"below threshold raw", true, 100 << 10, 0},
+		{"rule disabled", false, 100 << 10, 1},
+	}
+	for _, c := range cases {
+		out := filepath.Join(t.TempDir(), "t.nup")
+		if _, err := Pack(ctx, pkg(), out, PackOptions{Level: 3, LargeRaw: c.largeRaw, LargeFileThreshold: c.threshold}); err != nil {
+			t.Fatalf("%s: Pack: %v", c.name, err)
+		}
+		got := codecs(t, out)
+		if codec(t, got, "romfs/big.txt") != c.big || codec(t, got, "romfs/small.txt") != 1 {
+			t.Errorf("%s: codecs = %v, want big=%d small=1", c.name, got, c.big)
+		}
+	}
+}
+
+func TestMinSavings(t *testing.T) {
+	ctx := context.Background()
+	half := partlyRandom(t, 256<<10, 50)
+	little := partlyRandom(t, 256<<10, 6)
+	for _, c := range []struct {
+		min          float64
+		half, little int
+	}{
+		{0, 1, 1},
+		{3, 1, 1},
+		{10, 1, 0},
+		{60, 0, 0},
+	} {
+		out := filepath.Join(t.TempDir(), "s.nup")
+		pkgs := []Package{{TitleID: testTID, Kind: 0, Files: map[string]*Source{
+			"romfs/half":   SourceData(half),
+			"romfs/little": SourceData(little),
+		}}}
+		if _, err := Pack(ctx, pkgs, out, PackOptions{Level: 3, LargeRaw: true, MinSavings: c.min}); err != nil {
+			t.Fatalf("MinSavings %v: Pack: %v", c.min, err)
+		}
+		got := codecs(t, out)
+		if codec(t, got, "romfs/half") != c.half || codec(t, got, "romfs/little") != c.little {
+			t.Errorf("MinSavings %v: codecs = %v, want half=%d little=%d", c.min, got, c.half, c.little)
+		}
+	}
+}
+
+func TestPolicyValidation(t *testing.T) {
+	ctx := context.Background()
+	pkgs := []Package{{TitleID: testTID, Kind: 0, Files: map[string]*Source{"romfs/a": SourceData([]byte("x"))}}}
+	for _, opts := range []PackOptions{
+		{Level: 3, MinSavings: 100},
+		{Level: 3, MinSavings: -1},
+		{Level: 3, LargeFileThreshold: -1},
+	} {
+		if _, err := Pack(ctx, pkgs, filepath.Join(t.TempDir(), "v.nup"), opts); err == nil {
+			t.Errorf("Pack(%+v): want a validation error", opts)
+		}
+	}
+}
+
 func TestLevelValidation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

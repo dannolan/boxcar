@@ -10,32 +10,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/dannolan/boxcar/internal/binfmt"
 	"github.com/dannolan/boxcar/internal/diskfree"
 	"github.com/klauspost/compress/zstd"
 )
-
-type fileNode struct {
-	nameOff, nameLen int
-	source           *Source
-	off              int64
-	stored           int64
-	digest           [32]byte
-	codec            int
-}
-
-type dirNode struct {
-	nameOff, nameLen int
-	first, count     int
-}
-
-type childEntry struct {
-	isDir bool
-	index int
-}
 
 type fpKey struct {
 	size  int64
@@ -70,6 +50,7 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 	}
 	validatePackages(packages)
 	binfmt.Require(level == 1 || level == 3 || level == 9, "Choose compression level 1, 3 or 9.")
+	policy := newCodecPolicy(opts.LargeRaw, opts.LargeFileThreshold, opts.MinSavings)
 
 	abs, err := filepath.Abs(output)
 	if err != nil {
@@ -82,113 +63,36 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 		return res, err
 	}
 
-	// Tree construction + name interning (mirrors pack's nested dicts).
-	var dirs []dirNode
-	var files []fileNode
-	var children []childEntry
-	var roots []int
-	pool := []byte{}
-	names := map[string]int{}
-	intern := func(name string) (int, int) {
-		data := []byte(name)
-		key := string(data)
-		if off, ok := names[key]; ok {
-			return off, len(data)
-		}
-		off := len(pool)
-		names[key] = off
-		pool = append(pool, data...)
-		return off, len(data)
-	}
-
-	for pi := range packages {
-		p := &packages[pi]
-		tree := map[string]any{}
-		dirList := append([]string(nil), p.Directories...)
-		sort.Strings(dirList)
-		for _, path := range dirList {
-			branch := tree
-			for _, name := range pathParts(path) {
-				next, ok := branch[name].(map[string]any)
-				if !ok {
-					next = map[string]any{}
-					branch[name] = next
-				}
-				branch = next
-			}
-		}
-		for path, source := range p.Files {
-			parts := pathParts(path)
-			branch := tree
-			for _, name := range parts[:len(parts)-1] {
-				if _, isFile := branch[name].(*Source); isFile {
-					binfmt.Fail("File/directory collision.")
-				}
-				next, ok := branch[name].(map[string]any)
-				if !ok {
-					next = map[string]any{}
-					branch[name] = next
-				}
-				branch = next
-			}
-			last := parts[len(parts)-1]
-			binfmt.Require(branch[last] == nil, "Duplicate file/directory path.")
-			branch[last] = source
-		}
-
-		var visit func(branch map[string]any, name string, depth int) int
-		visit = func(branch map[string]any, name string, depth int) int {
-			binfmt.Check(ctx)
-			binfmt.Require(depth < 256, "Directory nesting exceeds 255 levels.")
-			index := len(dirs)
-			dirs = append(dirs, dirNode{})
-			start := len(children)
-			namesSorted := sortedKeys(branch)
-			children = append(children, make([]childEntry, len(namesSorted))...)
-			for j, n := range namesSorted {
-				value := branch[n]
-				if sub, ok := value.(map[string]any); ok {
-					children[start+j] = childEntry{isDir: true, index: visit(sub, n, depth+1)}
-				} else {
-					src := value.(*Source)
-					children[start+j] = childEntry{isDir: false, index: len(files)}
-					no, nl := intern(n)
-					files = append(files, fileNode{nameOff: no, nameLen: nl, source: src})
-				}
-			}
-			no, nl := intern(name)
-			dirs[index] = dirNode{nameOff: no, nameLen: nl, first: start, count: len(namesSorted)}
-			return index
-		}
-		roots = append(roots, visit(tree, "", 0))
-	}
-
-	binfmt.Require(len(dirs)+len(files) < int(none), "Too many NUP nodes.")
-
-	pooloff := 48 + len(packages)*64 + len(dirs)*24 + len(files)*80 + len(children)*4
-	tocsize := binfmt.Align(int64(pooloff+len(pool)), 16)
-	binfmt.Require(tocsize <= 256*1024*1024, "NUP file table exceeds 256 MiB.")
-	bloboff := binfmt.Align(128+tocsize, 16)
+	l := planLayout(ctx, packages)
+	files := l.files
+	bloboff := l.bloboff
 
 	var total int64
 	for _, f := range files {
 		total += f.source.size
 	}
 	binfmt.Require(uint64(total)+uint64(bloboff) <= 0xffffffffffffffff, "NUP payload exceeds its 64-bit size limit.")
-	free, err := diskfree.Available(filepath.Dir(output))
+	temp := output + "." + randomHex() + ".partial"
+	release, err := diskfree.Reserve(filepath.Dir(output), temp, total+bloboff)
 	if err != nil {
 		return res, err
 	}
-	binfmt.Require(free >= uint64(total)+uint64(bloboff)+32*1024*1024, "Not enough free space for the worst-case NUP size.")
-
-	temp := output + "." + randomHex() + ".partial"
-	defer func() { _ = os.Remove(temp) }()
-
+	defer release()
 	out, err := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
 	if err != nil {
 		return res, err
 	}
+	// Registered only once the exclusive create succeeded: a name that
+	// already existed belongs to someone else and must not be removed.
+	defer func() { _ = os.Remove(temp) }()
 	defer out.Close()
+	// One encoder at a time and the read buffers, from the working-memory
+	// budget shared with optimizations.
+	if err := memBudget.acquire(ctx, encoderCost(level)+2*Block); err != nil {
+		binfmt.Check(ctx)
+		return res, err
+	}
+	defer memBudget.release(encoderCost(level) + 2*Block)
 
 	if err := writeZeros(out, bloboff); err != nil {
 		return res, err
@@ -233,7 +137,7 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 					extentErr = err
 					return
 				}
-				stored, digest, codec = writeExtent(ctx, out, source, dr.stream, dr.first, level, opts.LargeRaw, onRead, dr.digest)
+				stored, digest, codec = writeExtent(ctx, out, source, dr.stream, dr.first, level, policy, onRead, dr.digest)
 			}()
 			if extentErr != nil {
 				return res, extentErr
@@ -252,7 +156,6 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 	}
 
 	// Metadata extents.
-	type metaExtent struct{ off, size int64 }
 	meta := make([]metaExtent, len(packages))
 	for i := range packages {
 		p := &packages[i]
@@ -269,94 +172,8 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 
 	end, _ := out.Seek(0, io.SeekCurrent)
 
-	// TOC assembly.
-	toc := make([]byte, tocsize)
-	copy(toc[0:4], "TOC\x01")
-	binfmt.PutU32(toc, 4, uint32(len(packages)))
-	binfmt.PutU64(toc, 8, uint64(len(dirs)))
-	binfmt.PutU64(toc, 16, uint64(len(files)))
-	binfmt.PutU64(toc, 24, uint64(pooloff))
-	binfmt.PutU64(toc, 32, uint64(len(pool)))
-	at := 48
-	for pi := range packages {
-		p := &packages[pi]
-		root := roots[pi]
-		exefs := none
-		romfs := none
-		for _, target := range [2]string{"exefs", "romfs"} {
-			d := dirs[root]
-			for _, ch := range children[d.first : d.first+d.count] {
-				if !ch.isDir {
-					continue
-				}
-				cd := dirs[ch.index]
-				wantOff, wantLen := internedName(names, target)
-				if cd.nameOff == wantOff && cd.nameLen == wantLen {
-					if target == "exefs" {
-						exefs = uint32(ch.index)
-					} else {
-						romfs = uint32(ch.index)
-					}
-				}
-			}
-		}
-		binfmt.PutU64(toc, at+0, p.TitleID)
-		binfmt.PutU32(toc, at+8, uint32(root))
-		binfmt.PutU32(toc, at+12, exefs)
-		binfmt.PutU32(toc, at+16, romfs)
-		binfmt.PutU32(toc, at+20, p.Version)
-		toc[at+24] = byte(p.Kind)
-		toc[at+25] = byte(p.Flags)
-		binfmt.PutU64(toc, at+32, uint64(meta[pi].off))
-		binfmt.PutU32(toc, at+40, uint32(meta[pi].size))
-		at += 64
-	}
-	for _, d := range dirs {
-		binfmt.PutU32(toc, at+0, uint32(d.nameOff))
-		binfmt.PutU32(toc, at+4, uint32(d.nameLen))
-		binfmt.PutU32(toc, at+8, uint32(d.first))
-		binfmt.PutU32(toc, at+12, uint32(d.count))
-		at += 24
-	}
-	for _, f := range files {
-		binfmt.PutU32(toc, at+0, uint32(f.nameOff))
-		binfmt.PutU32(toc, at+4, uint32(f.nameLen))
-		binfmt.PutU64(toc, at+8, uint64(f.source.size))
-		binfmt.PutU64(toc, at+16, uint64(f.off))
-		binfmt.PutU64(toc, at+24, uint64(f.stored))
-		copy(toc[at+32:at+64], f.digest[:])
-		toc[at+64] = byte(f.codec)
-		at += 80
-	}
-	for _, ch := range children {
-		node := uint32(ch.index)
-		if !ch.isDir {
-			node += uint32(len(dirs))
-		}
-		binfmt.PutU32(toc, at, node)
-		at += 4
-	}
-	copy(toc[pooloff:pooloff+len(pool)], pool)
-
-	// Identity + superblock.
-	identityBuf := make([]byte, 0, len(packages)*13)
-	for _, p := range packages {
-		identityBuf = binfmt.AppendU64(identityBuf, p.TitleID)
-		identityBuf = binfmt.AppendU32(identityBuf, p.Version)
-		identityBuf = append(identityBuf, byte(p.Kind))
-	}
-	identityHash := binfmt.SHA256Sum(identityBuf)
-	header := make([]byte, 128)
-	copy(header[0:4], "NUP\x01")
-	binfmt.PutU16(header, 4, 128)
-	binfmt.PutU16(header, 6, 1)
-	binfmt.PutU64(header, 8, 128)
-	binfmt.PutU64(header, 16, uint64(tocsize))
-	copy(header[24:56], binfmt.SHA256Sum(toc))
-	binfmt.PutU64(header, 56, uint64(bloboff))
-	binfmt.PutU64(header, 64, uint64(end))
-	binfmt.PutU32(header, 72, uint32(len(packages)))
-	copy(header[80:96], identityHash[:16])
+	toc := l.toc(packages, meta)
+	header := superblock(packages, toc, bloboff, end)
 
 	if _, err := out.Seek(0, io.SeekStart); err != nil {
 		return res, err
@@ -400,7 +217,10 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 		}
 	}
 	binfmt.Check(ctx)
-	if err := commitFile(temp, output); err != nil {
+	if err := out.Close(); err != nil { // (Windows cannot move an open file)
+		return res, err
+	}
+	if err := commitNew(temp, output); err != nil {
 		return res, err
 	}
 	if opts.Progress != nil {
@@ -417,20 +237,11 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 	}, nil
 }
 
-// internedName returns the interned offset (or -1) and length of name.
-func internedName(names map[string]int, name string) (int, int) {
-	off, ok := names[name]
-	if !ok {
-		off = -1
-	}
-	return off, len(name)
-}
-
-func writeZeros(out *os.File, n int64) error {
+func writeZeros(out io.Writer, n int64) error {
 	if n <= 0 {
 		return nil
 	}
-	buf := make([]byte, 1<<20)
+	buf := make([]byte, min64(n, 1<<20))
 	for n > 0 {
 		c := int64(len(buf))
 		if n < c {
@@ -519,10 +330,12 @@ func dedupStream(ctx context.Context, source *Source, prefixes map[fpKey]bool, s
 }
 
 // writeExtent writes one file extent, compressing with zstd (or storing raw),
-// with an early raw fallback (port of nup_format.write_extent).
-func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.ReadCloser, first []byte, level int, largeRaw bool, onRead func(int64), knownDigest []byte) (stored int64, digest []byte, codec int) {
+// with an early raw fallback (port of nup_format.write_extent). With the
+// default policy a frame is kept only when it is smaller than the file.
+func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.ReadCloser, first []byte, level int, policy codecPolicy, onRead func(int64), knownDigest []byte) (stored int64, digest []byte, codec int) {
 	start, _ := out.Seek(0, io.SeekCurrent)
-	codecBool := chooseCodec(source.size, largeRaw)
+	codecBool := policy.compress(source.size)
+	limit := policy.maxStored(source.size)
 	h := sha256.New()
 	var count int64
 	failed := false
@@ -571,7 +384,7 @@ func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.Re
 		b = buf[:n]
 		if enc != nil {
 			cur, _ := out.Seek(0, io.SeekCurrent)
-			if cur-start >= source.size {
+			if cur-start > limit {
 				failed = true
 				enc = nil
 			}
@@ -593,7 +406,7 @@ func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.Re
 		binfmt.Require(bytes.Equal(knownDigest, digest), "Source changed after duplicate checking.")
 	}
 
-	if failed || (enc != nil && stored >= source.size) {
+	if failed || (enc != nil && stored > limit) {
 		if _, err := out.Seek(start, io.SeekStart); err != nil {
 			binfmt.Fail("%v", err)
 		}
@@ -643,7 +456,8 @@ func writeExtent(ctx context.Context, out *os.File, source *Source, stream io.Re
 // known content size (so the frame verifies content_size == size) and forces
 // single-segment frames for small inputs (EncodeAll path).
 //
-// Level mapping: 1→SpeedFastest, 3→SpeedDefault, 9→SpeedBetterCompression.
+// Level mapping: 1→SpeedFastest, 3→SpeedDefault, 9→SpeedBetterCompression,
+// 19→SpeedBestCompression (optimizer only).
 // Ratios differ from the C zstd backend but the emitted frames are standard
 // and pass the same frame-validation rules.
 func newZstdEncoder(out io.Writer, level int, size int64) (*zstd.Encoder, error) {
@@ -655,6 +469,8 @@ func newZstdEncoder(out io.Writer, level int, size int64) (*zstd.Encoder, error)
 		lvl = zstd.SpeedDefault
 	case 9:
 		lvl = zstd.SpeedBetterCompression
+	case LevelBest:
+		lvl = zstd.SpeedBestCompression
 	default:
 		return nil, fmt.Errorf("unsupported compression level %d", level)
 	}

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,8 +32,10 @@ const (
 
 const none uint32 = 0xffffffff // sentinel for absent directory index
 
-// Presets maps friendly preset names to the three accepted compression levels.
-var Presets = map[string]int{"Fast": 1, "Balanced": 3, "Smaller": 9}
+// Presets maps friendly preset names to compression levels. Pack accepts
+// Fast, Balanced and Smaller (the reference's 1, 3, 9); the optimizer also
+// accepts Best (SpeedBestCompression).
+var Presets = map[string]int{"Fast": 1, "Balanced": 3, "Smaller": 9, "Best": LevelBest}
 
 var kindNames = []string{"base", "update", "addon", "addon_update", "system"}
 
@@ -60,6 +63,13 @@ type Package struct {
 	Metadata    []TLV
 	Flags       int
 	Label       string
+
+	// Record details of a package read from an archive that a rewrite must
+	// reproduce: the root directory's name (normally empty) and which of
+	// exefs/ (bit 0) and romfs/ (bit 1) exist without the record pointing
+	// at them.
+	rootName  string
+	unsetDirs uint8
 }
 
 // PackageInfo is the typed form of a Python inspect() packages_info entry.
@@ -76,11 +86,49 @@ type PackageInfo struct {
 
 // PackOptions controls Pack (port of nup_format.pack keyword arguments).
 type PackOptions struct {
-	Level       int
-	LargeRaw    bool
+	Level    int
+	LargeRaw bool
+	// LargeFileThreshold is the size above which LargeRaw keeps files raw;
+	// 0 means LargeFile (256 MiB, the reference value).
+	LargeFileThreshold int64
+	// MinSavings is the share of a file's size, in percent, that zstd must
+	// save for the file to be stored compressed; 0 keeps any saving (the
+	// reference rule).
+	MinSavings  float64
 	Verify      bool
 	Progress    binfmt.Progress
 	SourceGuard func() error
+}
+
+// codecPolicy decides per file between zstd and raw storage.
+type codecPolicy struct {
+	largeRaw   bool
+	threshold  int64
+	minSavings float64
+}
+
+func newCodecPolicy(largeRaw bool, threshold int64, minSavings float64) codecPolicy {
+	binfmt.Require(threshold >= 0, "The large-file threshold cannot be negative.")
+	binfmt.Require(minSavings >= 0 && minSavings < 100, "Minimum savings must be at least 0 and below 100 percent.")
+	if threshold == 0 {
+		threshold = LargeFile
+	}
+	return codecPolicy{largeRaw: largeRaw, threshold: threshold, minSavings: minSavings}
+}
+
+// compress reports whether a file of the given size should be tried with zstd.
+func (p codecPolicy) compress(size int64) bool {
+	return size > 0 && !(p.largeRaw && size > p.threshold)
+}
+
+// maxStored is the largest zstd extent that still saves enough over a raw
+// extent of size bytes.
+func (p codecPolicy) maxStored(size int64) int64 {
+	save := int64(math.Ceil(float64(size) * p.minSavings / 100))
+	if save < 1 {
+		save = 1
+	}
+	return size - save
 }
 
 // Result is the Pack/Extract result (port of the Python result dicts).
@@ -103,6 +151,8 @@ type Source struct {
 	size      int64
 	opener    func() (io.ReadCloser, error)
 	validator func() error
+	archive   *Archive // set for a file of a parsed archive
+	index     int      // its file record index in archive
 }
 
 type sourceStamp struct {
@@ -382,11 +432,6 @@ func parseTlvs(data []byte) (items []TLV, err error) {
 		at += size
 	}
 	return items, nil
-}
-
-// chooseCodec returns whether a file of the given size should be compressed.
-func chooseCodec(size int64, largeRaw bool) bool {
-	return size > 0 && !(largeRaw && size > LargeFile)
 }
 
 func sortedKeys(m map[string]any) []string {

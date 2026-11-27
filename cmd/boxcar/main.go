@@ -44,6 +44,8 @@ func run(args []string) int {
 		return runDLC(args[1:])
 	case "nup":
 		return runNup(args[1:])
+	case "optimize":
+		return runOptimize(args[1:])
 	case "patch":
 		return runPatch(args[1:])
 	case "keys":
@@ -56,7 +58,7 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: boxcar <build|dlc|nup|patch|keys> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: boxcar <build|dlc|nup|optimize|patch|keys> [flags]")
 	fmt.Fprintln(os.Stderr, "       boxcar -version")
 }
 
@@ -226,6 +228,9 @@ func runDLC(args []string) int {
 }
 
 func runNup(args []string) int {
+	if nupOperation(args) == "optimize" {
+		return runOptimize(args)
+	}
 	fs := flag.NewFlagSet("nup", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	op := fs.String("nup-operation", "", "")
@@ -234,6 +239,8 @@ func runNup(args []string) int {
 	preset := fs.String("preset", "Balanced", "")
 	largeRaw := fs.Bool("large-files-raw", true, "")
 	noLargeRaw := fs.Bool("no-large-files-raw", false, "")
+	largeThreshold := fs.String("large-file-threshold", "256MiB", "")
+	minSavings := fs.Float64("min-savings", 0, "")
 	latestSnapshot := fs.Bool("latest-snapshot", true, "")
 	noLatestSnapshot := fs.Bool("no-latest-snapshot", false, "")
 	verify := fs.Bool("verify", true, "")
@@ -249,12 +256,18 @@ func runNup(args []string) int {
 		fmt.Fprintf(os.Stderr, "boxcar nup: unknown preset %q\n", *preset)
 		return 1
 	}
+	threshold, err := parseSize(*largeThreshold)
+	if err != nil || threshold < 1 {
+		fmt.Fprintf(os.Stderr, "boxcar nup: invalid --large-file-threshold %q\n", *largeThreshold)
+		return 1
+	}
 	largeRawVal := *largeRaw && !*noLargeRaw
 	latestVal := *latestSnapshot && !*noLatestSnapshot
 	verifyVal := *verify && !*noVerify
 
 	ctx := context.Background()
-	opts := nup.PackOptions{Level: level, LargeRaw: largeRawVal, Verify: verifyVal, Progress: progress()}
+	opts := nup.PackOptions{Level: level, LargeRaw: largeRawVal, LargeFileThreshold: threshold,
+		MinSavings: *minSavings, Verify: verifyVal, Progress: progress()}
 
 	var result any
 	code := 0
@@ -310,6 +323,11 @@ func runNup(args []string) int {
 			code = 1
 		} else {
 			result = r
+			if notes, ok := r["notes"].([]string); ok {
+				for _, n := range notes {
+					fmt.Fprintf(os.Stderr, "note: %s; 'boxcar optimize' writes a compliant copy\n", n)
+				}
+			}
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "boxcar nup: unknown operation %q\n", *op)
