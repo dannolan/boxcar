@@ -207,6 +207,7 @@ func (s *Stream) pass(opts *WriteOpts, emit func(chunk []byte) error) error {
 	flush := func(force bool) error {
 		binfmt.Check(ctx)
 		for int64(len(pending)) >= block || (force && len(pending) > 0) {
+			binfmt.Check(ctx)
 			n := block
 			if int64(len(pending)) < n {
 				n = int64(len(pending))
@@ -231,6 +232,43 @@ func (s *Stream) pass(opts *WriteOpts, emit func(chunk []byte) error) error {
 			activePath = ""
 		}
 	}
+	// passFile appends one file part to pending, flushing as it goes. The
+	// file is closed by defer on every exit, including the Failure panic
+	// binfmt.Check raises on cancellation (recovered by the exported
+	// callers), so a cancelled pass never leaks the handle.
+	passFile := func(p *Part, src *hashTracker) error {
+		binfmt.Check(ctx)
+		f, err := os.Open(p.Path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		remaining := p.Size
+		buf := make([]byte, 1<<20)
+		for remaining > 0 {
+			binfmt.Check(ctx)
+			n := int64(len(buf))
+			if remaining < n {
+				n = remaining
+			}
+			read, rerr := io.ReadFull(f, buf[:n])
+			if rerr != nil && !(rerr == io.EOF && int64(read) == n) {
+				return fmt.Errorf("Source changed or short read: %w", rerr)
+			}
+			if int64(read) != n {
+				return fmt.Errorf("Source changed or short read")
+			}
+			pending = append(pending, buf[:read]...)
+			remaining -= int64(read)
+			if src != nil {
+				src.h.Write(buf[:read])
+			}
+			if err := flush(false); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for i := range s.parts {
 		p := &s.parts[i]
 		var src *hashTracker
@@ -241,37 +279,9 @@ func (s *Stream) pass(opts *WriteOpts, emit func(chunk []byte) error) error {
 			}
 		}
 		if p.Path != "" {
-			f, err := os.Open(p.Path)
-			if err != nil {
+			if err := passFile(p, src); err != nil {
 				return err
 			}
-			remaining := p.Size
-			buf := make([]byte, 1<<20)
-			for remaining > 0 {
-				n := int64(len(buf))
-				if remaining < n {
-					n = remaining
-				}
-				read, rerr := io.ReadFull(f, buf[:n])
-				if rerr != nil && !(rerr == io.EOF && int64(read) == n) {
-					f.Close()
-					return fmt.Errorf("Source changed or short read: %w", rerr)
-				}
-				if int64(read) != n {
-					f.Close()
-					return fmt.Errorf("Source changed or short read")
-				}
-				pending = append(pending, buf[:read]...)
-				remaining -= int64(read)
-				if src != nil {
-					src.h.Write(buf[:read])
-				}
-				if err := flush(false); err != nil {
-					f.Close()
-					return err
-				}
-			}
-			f.Close()
 			finishTracker()
 		} else {
 			data := p.Data
