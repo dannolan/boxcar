@@ -14,6 +14,16 @@
   `--force`), keeps going past failures. `--dry-run` previews with size
   estimates. `--latest-snapshot` is an opt-in consolidation. See
   docs/OPTIMIZE.md for KaiDump and nx2-flow workflows.
+- **NUP deviations are reported.** Archives Boxcar accepts although the spec
+  or the reference reader does not (KaiDump empty-file offsets, metadata
+  before the blob region) get a note from `optimize` and from
+  `nup --nup-operation verify`/`inspect` (`notes` in their JSON), and
+  `optimize` rewrites them into compliant archives.
+- **Faster NUP verification and extraction.** Read buffers and zstd
+  decoders are reused across files, and alignment padding no longer
+  allocates 1 MiB per extent; on a 67,000-file archive, verification went
+  from 8.5 s to 1.4 s and optimizing from 14.4 s / 240 MB RSS to
+  4.6 s / 128 MB.
 - **NUP reader: accept third-party-packed archives.** Package metadata may
   live anywhere in the file (in-bounds, non-overlapping) instead of requiring
   `blobOff <= metaOff`. Real-world NUPs from other packers were rejected by

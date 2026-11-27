@@ -63,12 +63,22 @@ compressed file is kept only if it is smaller than the raw file (or, with
 `--min-savings N`, at least N percent smaller).
 
 An archive counts as **already optimized** when the estimated savings are
-below `--min-gain` (default 1% of the archive) and nothing breaks the
-storage policy. Such archives are skipped unless you pass `--force`.
-Archives whose compressed files break the policy (for example a 1 GiB file
-compressed by another tool while the threshold is 256 MiB) are always
-rewritten, even if the result is larger, because that is what the policy
-asks for.
+below `--min-gain` (default 1% of the archive), nothing breaks the storage
+policy and it follows the NUP spec. Such archives are skipped unless you
+pass `--force`. Archives whose compressed files break the policy (for
+example a 1 GiB file compressed by another tool while the threshold is
+256 MiB) are always rewritten, even if the result is larger, because that
+is what the policy asks for.
+
+### Archives that deviate from the spec
+
+Boxcar reads two kinds of archives that the NUP spec or the NSP-Box reader
+does not allow: KaiDump's empty files with a nonzero extent offset, and
+package metadata stored before the blob region. `boxcar optimize` (and
+`nup --nup-operation verify`/`inspect`) prints a `note:` line for them, and
+optimizing rewrites them even when there is nothing to save, because the
+rewrite is compliant (`normalized:` in the output). The JSON lists them
+under `plan.deviations` (`notes` for verify/inspect).
 
 ## Safety
 
@@ -99,15 +109,17 @@ asks for.
   exit status is 1 if any archive failed.
 
 `--in-place` needs free space for one complete optimized copy on the same
-drive while it works. Memory use does not grow with archive or file size:
-files stream through fixed buffers (a 96 MiB file peaks at about 31 MiB of
-heap in the test suite), so each concurrent job needs tens of megabytes.
+drive while it works. Memory use does not depend on how large the files
+are, since every file streams through fixed buffers; it grows with how many
+files the archive holds, because their table is kept in memory. In tests a
+4.1 GB archive of 22,000 files peaked at about 75 MB and a 67,000-file
+archive at about 130 MB, per concurrent job.
 
 ## Options
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--output PATH` | | New archive: a `.nup` path for one archive, otherwise a folder that receives the archives under their relative paths |
+| `--output PATH` | | New archive: a `.nup` path for one archive, otherwise a folder that receives the archives under their relative paths (that folder is never searched for inputs) |
 | `--in-place` | off | Replace each archive after its rewrite is verified |
 | `--dry-run` | off | Plan and estimate only; nothing is written |
 | `--recursive` | off | Also search subfolders of folder inputs |
@@ -127,9 +139,15 @@ heap in the test suite), so each concurrent job needs tens of megabytes.
 
 Progress and one line per archive go to stderr; the JSON result goes to
 stdout. A dry run estimates the output size by compressing every file that
-would be compressed or, when that is more than 32 MiB, evenly spread
-samples of them; sampled estimates are approximate (`"exact": false` in the
-plan), and a real run always reports the actual sizes.
+would be compressed or, when that is more than 64 MiB, evenly spread
+samples of them; sampled estimates are approximate and lean conservative
+(`"exact": false` in the plan), and a real run always reports the actual
+sizes.
+
+Optimized copies kept inside a folder you search later (for example
+`games/optimized/` under `games/`) are archives like any other: a later
+`--recursive` run lists them and skips them as already optimized. The
+folder given as `--output` in the same run is never searched.
 
 ## Workflow: KaiDump backups
 
@@ -145,7 +163,9 @@ spec-compliant.
    mode) or over USB. KaiDump cannot write a NUP larger than 4 GiB to a
    FAT32 card.
 2. Copy the `.nup` to your computer and check it:
-   `boxcar nup --nup-operation verify --input "Game [0100...].nup"`
+   `boxcar nup --nup-operation verify --input "Game [0100...].nup"`.
+   A `note:` about empty files means the dump contains zero-length files
+   that strict readers reject; optimizing fixes that.
 3. Preview: `boxcar optimize "Game [0100...].nup" --dry-run`
 4. Optimize into a new file, or in place once you trust the process:
 

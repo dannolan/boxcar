@@ -125,7 +125,7 @@ func ValidatePackages(packages []Package) error
 func SafeName(name string, windows bool) error
 func PathParts(path string) ([]string, error)
 func Pack(ctx context.Context, packages []Package, output string, opts PackOptions) (Result, error)
-func Open(ctx context.Context, path string) (*Archive, error)       // Archive: Packages/Verify/Inspect/FileChunks/Contents
+func Open(ctx context.Context, path string) (*Archive, error)       // Archive: Packages/Verify/Inspect/FileChunks/Contents/Deviations
 func Extract(ctx context.Context, path, output string, selection []int, progress binfmt.Progress) (Result, error)
 func PackagePath(p Package) string
 type Content struct{ TitleID uint64; Version uint32; Kind, Flags int; Root string; ExeFS, RomFS bool
@@ -232,6 +232,10 @@ every push with a pinned reference checkout.
    writers (pack, optimize) always emit 0, so optimizing a KaiDump archive
    also makes it readable by strict readers.
    Regression test: `internal/nup/kaidump_test.go`.
+
+`Archive.Deviations` reports archives that rely on 7 or 8; `nup inspect`/
+`verify` add them as `notes`, and `optimize` rewrites such archives even
+when there is nothing to save.
 
 ## Dependency policy
 
