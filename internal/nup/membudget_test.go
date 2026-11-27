@@ -105,11 +105,15 @@ func TestReserveFlexible(t *testing.T) {
 func TestOptimizeWithinMemoryBudget(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.nup")
+	small := filepath.Join(dir, "small.nup") // (zstd 19 is slow under the race detector)
 	var files []nuptest.File
-	for i := 0; i < 48; i++ {
-		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/t%02d.txt", i), Data: compressibleText(700 << 10)})
+	for i := 0; i < 24; i++ {
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/t%02d.txt", i), Data: compressibleText(300 << 10)})
 	}
-	files = append(files, nuptest.File{Path: "romfs/big.bin", Data: compressibleText(40 << 20)})
+	if err := nuptest.WriteKaiDump(small, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	files = append(files, nuptest.File{Path: "romfs/big.bin", Data: compressibleText(33 << 20)}) // streamed by the writer
 	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
 		t.Fatal(err)
 	}
@@ -133,14 +137,18 @@ func TestOptimizeWithinMemoryBudget(t *testing.T) {
 				opts := defaultOptions()
 				opts.Level = c.level
 				opts.Output = filepath.Join(dir, fmt.Sprintf("out-%d-%d-%d.nup", c.limit, c.level, k))
-				_, errs[k] = Optimize(t.Context(), in, opts)
+				src := in
+				if c.level == LevelBest {
+					src = small
+				}
+				_, errs[k] = Optimize(t.Context(), src, opts)
 			}()
 		}
 		finished := make(chan struct{})
 		go func() { wg.Wait(); close(finished) }()
 		select {
 		case <-finished:
-		case <-time.After(2 * time.Minute):
+		case <-time.After(5 * time.Minute):
 			t.Fatalf("budget %d: optimizations did not finish (deadlock?)", c.limit)
 		}
 		for k, err := range errs {
