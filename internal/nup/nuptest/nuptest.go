@@ -18,12 +18,16 @@ import (
 
 // File is one file of a package, at a slash-separated path below the
 // package root. Content comes from Data, or from Source (exactly Size bytes)
-// when Source is set, so large inputs never have to sit in memory.
+// when Source is set, so large inputs never have to sit in memory. Extent,
+// when set, is stored instead of the content, with codec Codec; Data still
+// supplies the file's size and SHA-256.
 type File struct {
 	Path   string
 	Data   []byte
 	Size   int64
 	Source io.Reader
+	Extent []byte
+	Codec  uint8
 }
 
 // Package is one NUP package record and its tree.
@@ -32,8 +36,10 @@ type Package struct {
 	Version uint32
 	Kind    uint8
 	Flags   uint8
-	// Files are visited in the given order, the way a dumper walks readdir
-	// results; only each directory's child list is sorted.
+	// Files are walked the way KaiDump scans a dump: depth first, with each
+	// directory's entries in the order they first appear here. File records
+	// and extents follow that walk; only each directory's child list is
+	// sorted.
 	Files []File
 	// Dirs lists directories that must exist even when empty.
 	Dirs []string
@@ -100,6 +106,9 @@ func WriteKaiDump(path string, packages []Package, opts Options) error {
 	hs := opts.HeaderSize
 	if hs == 0 {
 		hs = 0x80
+	}
+	if hs < 0x80 {
+		return errors.New("nuptest: the superblock is at least 0x80 bytes")
 	}
 	hv := opts.HeaderVersion
 	if hv == 0 {
@@ -178,6 +187,14 @@ func WriteKaiDump(path string, packages []Package, opts Options) error {
 			position = aligned
 		}
 		f.offset = position
+		if f.file.Extent != nil {
+			f.digest = sha256.Sum256(f.file.Data)
+			if _, err := out.Write(f.file.Extent); err != nil {
+				return err
+			}
+			position += int64(len(f.file.Extent))
+			continue
+		}
 		h := sha256.New()
 		var src io.Reader = bytes.NewReader(f.file.Data)
 		if f.file.Source != nil {
@@ -267,11 +284,16 @@ func WriteKaiDump(path string, packages []Package, opts Options) error {
 		if f.file.Source != nil {
 			size = f.file.Size
 		}
+		stored := size
+		if f.file.Extent != nil {
+			stored = int64(len(f.file.Extent))
+			toc[at+64] = f.file.Codec
+		}
 		le.PutUint32(toc[at:], uint32(stringAt))
 		le.PutUint32(toc[at+4:], uint32(len(f.name)))
 		le.PutUint64(toc[at+8:], uint64(size))
 		le.PutUint64(toc[at+16:], uint64(f.offset))
-		le.PutUint64(toc[at+24:], uint64(size))
+		le.PutUint64(toc[at+24:], uint64(stored))
 		copy(toc[at+32:at+64], f.digest[:])
 		copy(names[stringAt:], f.name)
 		stringAt += len(f.name)

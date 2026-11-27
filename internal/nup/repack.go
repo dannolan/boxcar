@@ -396,7 +396,8 @@ func (p Plan) verdict(minGain float64, changed, recompress bool) (string, bool) 
 	case p.PolicyFixes > 0:
 		return fmt.Sprintf("%d compressed file(s) break the storage policy and will be rewritten", p.PolicyFixes), true
 	case recompress && p.Reencode > 0:
-		return fmt.Sprintf("%d compressed file(s) will be recompressed", p.Reencode), true
+		return fmt.Sprintf("%d compressed file(s) will be recompressed; the estimate assumes no gain, "+
+			"and in place the original is kept unless the result is smaller", p.Reencode), true
 	}
 	percent := 100 * float64(p.EstimatedSavings) / float64(max64(p.ArchiveSize, 1))
 	need := int64(math.Ceil(float64(p.ArchiveSize) * minGain / 100))
@@ -437,6 +438,9 @@ func planRepack(ctx context.Context, a *Archive, packages []Package, level int, 
 				if !covered[ext] {
 					np.verify = true
 					p.RedundantBytes += rec.stored
+					if act, oldOK := r.decide(rec); act == actDecode || act == actReencode && !oldOK {
+						p.PolicyFixes++
+					}
 				}
 			} else {
 				writers[key] = i
@@ -468,6 +472,9 @@ func planRepack(ctx context.Context, a *Archive, packages []Package, level int, 
 	}
 	r.estimateCompression()
 	r.estimateSizes()
+	if p.Reencode > 0 {
+		p.Exact = false // re-encoded frames are estimated at their current size
+	}
 	return r
 }
 
@@ -612,9 +619,14 @@ func (r *repacking) readRaw(rec fileRecord, off int64, dst []byte) {
 }
 
 // estimateSizes predicts the output size and bounds it while it is written.
+// Like Pack, every node that is not a duplicate (empty files included)
+// aligns the cursor.
 func (r *repacking) estimateSizes() {
 	pos, worst := r.l.bloboff, r.l.bloboff
 	for i, np := range r.nodes {
+		if np.writer < 0 {
+			pos, worst = binfmt.Align(pos, 16), binfmt.Align(worst, 16)
+		}
 		if np.writer != i {
 			continue
 		}
@@ -703,14 +715,24 @@ func (f *frameLimit) Write(p []byte) (int, error) {
 
 type repackWriter struct {
 	*repacking
-	out    *sink
-	enc    *zstd.Encoder
-	dec    *zstd.Decoder
-	buf    []byte
-	stats  RepackStats
-	total  int64
-	done   int64
-	report func(done, total int64)
+	out      *sink
+	enc      *zstd.Encoder
+	dec      *zstd.Decoder
+	buf      []byte
+	stats    RepackStats
+	total    int64
+	done     int64
+	reported int64
+	report   func(done, total int64)
+}
+
+// progress reports how far the write has come. A file that falls back from
+// compression to raw is read a second time; that must not move it back.
+func (w *repackWriter) progress(done int64) {
+	if done > w.reported {
+		w.reported = done
+		w.report(done, w.total)
+	}
 }
 
 // write streams every extent, the metadata and the TOC into out.
@@ -741,6 +763,9 @@ func (r *repacking) write(out *os.File, report func(done, total int64)) (stats R
 		switch {
 		case np.writer < 0:
 			binfmt.Require(rec.digest == emptyDigest, "File SHA-256 mismatch: %s", rec.name)
+			start := binfmt.Align(w.out.pos, 16)
+			w.must(writeZeros(out, start-w.out.pos))
+			w.out.pos = start
 			f.off, f.stored, f.codec = 0, 0, 0
 		case np.writer != i:
 			if np.verify {
@@ -756,7 +781,7 @@ func (r *repacking) write(out *os.File, report func(done, total int64)) (stats R
 			f.stored, f.codec = w.store(np, rec)
 		}
 		w.done += rec.size
-		w.report(w.done, w.total)
+		w.progress(w.done)
 	}
 
 	meta := make([]metaExtent, len(r.packages))
@@ -892,7 +917,7 @@ func (w *repackWriter) content(rec fileRecord, dst io.Writer) error {
 					return err
 				}
 			}
-			w.report(w.done+count, w.total)
+			w.progress(w.done + count)
 		}
 		if rerr == io.EOF {
 			break
@@ -917,7 +942,7 @@ func (w *repackWriter) copyExtent(rec fileRecord) {
 			_, err := w.out.Write(w.buf[:n])
 			w.must(err)
 			copied += int64(n)
-			w.report(w.done+int64(float64(rec.size)*float64(copied)/float64(rec.stored)), w.total)
+			w.progress(w.done + int64(float64(rec.size)*float64(copied)/float64(rec.stored)))
 		}
 		if rerr == io.EOF {
 			break

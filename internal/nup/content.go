@@ -46,7 +46,7 @@ func (a *Archive) Contents() []Content {
 			Root:        p.rootName,
 			ExeFS:       a.records[i][1] != none,
 			RomFS:       a.records[i][2] != none,
-			Metadata:    a.metaRaw[i],
+			Metadata:    append([]byte(nil), a.metaRaw[i]...),
 			Directories: append([]string(nil), p.Directories...),
 		}
 		for name, idx := range a.trees[i] {
@@ -66,6 +66,7 @@ func contentsOf(packages []Package) []Content {
 	for i, p := range packages {
 		dirs := map[string]bool{}
 		for _, d := range p.Directories {
+			pathParts(d)
 			for ; d != "."; d = path.Dir(d) {
 				dirs[d] = true
 			}
@@ -76,6 +77,7 @@ func contentsOf(packages []Package) []Content {
 			Metadata: tlvBytes(p.Metadata),
 		}
 		for name, src := range p.Files {
+			pathParts(name)
 			binfmt.Require(src.archive != nil, "Only files of an opened NUP can be repacked: %s", name)
 			rec := src.archive.files[src.index]
 			c.Files = append(c.Files, FileContent{Path: name, Size: rec.size, SHA256: rec.digest})

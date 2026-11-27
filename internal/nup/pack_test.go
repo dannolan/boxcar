@@ -108,6 +108,16 @@ func codecs(t *testing.T, path string) map[string]int {
 	return out
 }
 
+// codec returns the codec of path, failing the test when it is missing.
+func codec(t *testing.T, codecs map[string]int, path string) int {
+	t.Helper()
+	c, ok := codecs[path]
+	if !ok {
+		t.Fatalf("%s missing from the archive: %v", path, codecs)
+	}
+	return c
+}
+
 // partlyRandom returns size bytes of which roughly zeroPercent are zeros, so
 // zstd saves a little less than that share.
 func partlyRandom(t *testing.T, size, zeroPercent int) []byte {
@@ -144,7 +154,7 @@ func TestLargeFileThreshold(t *testing.T) {
 			t.Fatalf("%s: Pack: %v", c.name, err)
 		}
 		got := codecs(t, out)
-		if got["romfs/big.txt"] != c.big || got["romfs/small.txt"] != 1 {
+		if codec(t, got, "romfs/big.txt") != c.big || codec(t, got, "romfs/small.txt") != 1 {
 			t.Errorf("%s: codecs = %v, want big=%d small=1", c.name, got, c.big)
 		}
 	}
@@ -172,7 +182,7 @@ func TestMinSavings(t *testing.T) {
 			t.Fatalf("MinSavings %v: Pack: %v", c.min, err)
 		}
 		got := codecs(t, out)
-		if got["romfs/half"] != c.half || got["romfs/little"] != c.little {
+		if codec(t, got, "romfs/half") != c.half || codec(t, got, "romfs/little") != c.little {
 			t.Errorf("MinSavings %v: codecs = %v, want half=%d little=%d", c.min, got, c.half, c.little)
 		}
 	}

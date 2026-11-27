@@ -165,6 +165,79 @@ func TestOptimizePackedArchive(t *testing.T) {
 	assertSameContent(t, in, out, expected)
 }
 
+// TestOptimizePackParityTrailingEmptyFile: Pack aligns the cursor before an
+// empty file too, so an unaligned last extent followed by one moves the
+// metadata; the rewrite must do the same to stay byte-identical.
+func TestOptimizePackParityTrailingEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	odd := make([]byte, 17)
+	rand.New(rand.NewSource(3)).Read(odd)
+	pkgs := []Package{{TitleID: testTID, Kind: 0, Metadata: []TLV{{Kind: 5, Data: []byte("T")}}, Files: map[string]*Source{
+		"romfs/a.bin": SourceData(odd),
+		"romfs/z":     SourceData(nil),
+	}}}
+	in := filepath.Join(dir, "in.nup")
+	if _, err := Pack(context.Background(), pkgs, in, PackOptions{Level: 3, LargeRaw: true}); err != nil {
+		t.Fatal(err)
+	}
+	opts := defaultOptions()
+	opts.Force = true
+	opts.Output = filepath.Join(dir, "out.nup")
+	res := optimizeT(t, in, opts)
+	if fileSHA(t, in) != fileSHA(t, opts.Output) {
+		t.Errorf("rewrite differs from Pack's layout")
+	}
+	if res.Plan.EstimatedSize != res.SizeAfter {
+		t.Errorf("estimate %d, actual %d", res.Plan.EstimatedSize, res.SizeAfter)
+	}
+}
+
+// rawBlockFrame wraps data (at most one zstd block) in a valid zstd frame
+// that stores it uncompressed, so the frame is larger than the file.
+func rawBlockFrame(data []byte) []byte {
+	n := len(data)
+	frame := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x60} // single segment, 2-byte content size
+	frame = binary.LittleEndian.AppendUint16(frame, uint16(n-256))
+	header := uint32(n)<<3 | 1 // raw block, last
+	frame = append(frame, byte(header), byte(header>>8), byte(header>>16))
+	return append(frame, data...)
+}
+
+// TestOptimizePolicyOnDuplicateExtent: the policy applies to every stored
+// extent, including a second copy that deduplication would drop.
+func TestOptimizePolicyOnDuplicateExtent(t *testing.T) {
+	dir := t.TempDir()
+	text := bytes.Repeat([]byte("duplicate frames "), 60) // 1020 bytes
+	var good bytes.Buffer
+	enc, err := newZstdEncoder(&good, 3, int64(len(text)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc.Write(text)
+	enc.Close()
+	noise := make([]byte, 1<<20)
+	rand.New(rand.NewSource(4)).Read(noise)
+	in := filepath.Join(dir, "in.nup")
+	pkgs := []nuptest.Package{{TitleID: testTID, Kind: 0, Files: []nuptest.File{
+		{Path: "romfs/a.txt", Data: text, Extent: good.Bytes(), Codec: 1},
+		{Path: "romfs/b.txt", Data: text, Extent: rawBlockFrame(text), Codec: 1},
+		{Path: "romfs/noise.bin", Data: noise},
+	}}}
+	if err := nuptest.WriteKaiDump(in, pkgs, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	openT(t, in)
+	opts := defaultOptions()
+	opts.Output = filepath.Join(dir, "out.nup")
+	res := optimizeT(t, in, opts)
+	if res.Plan.PolicyFixes != 1 || res.Status != "optimized" || !strings.Contains(res.Reason, "storage policy") {
+		t.Fatalf("result = %+v", res)
+	}
+	if b := openT(t, opts.Output); b.stats["unique_extents"].(int) != 2 {
+		t.Errorf("unique_extents = %v, want 2", b.stats["unique_extents"])
+	}
+}
+
 func TestOptimizeIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "kaidump.nup")
@@ -235,6 +308,11 @@ func TestOptimizeRecompress(t *testing.T) {
 		t.Fatalf("frames are reused without --recompress: %+v", res)
 	}
 	opts.Recompress = true
+	opts.DryRun = true
+	if plan := optimizeT(t, in, opts).Plan; plan.Exact || plan.Reencode == 0 {
+		t.Errorf("a re-encode estimate is not exact: %+v", plan)
+	}
+	opts.DryRun = false
 	res := optimizeT(t, in, opts)
 	if res.Status != "optimized" || res.Plan.Reencode == 0 {
 		t.Fatalf("result = %+v", res)
@@ -274,7 +352,7 @@ func TestOptimizeLargeFilePolicy(t *testing.T) {
 	if res.SizeAfter <= res.SizeBefore {
 		t.Errorf("expected growth from storing big.txt raw: %d -> %d", res.SizeBefore, res.SizeAfter)
 	}
-	if got := codecs(t, in); got["romfs/big.txt"] != 0 || got["romfs/small.txt"] != 1 {
+	if got := codecs(t, in); codec(t, got, "romfs/big.txt") != 0 || codec(t, got, "romfs/small.txt") != 1 {
 		t.Errorf("codecs = %v", got)
 	}
 
@@ -284,7 +362,7 @@ func TestOptimizeLargeFilePolicy(t *testing.T) {
 	if res.Status != "optimized" || res.Stats.Compressed != 1 {
 		t.Fatalf("result = %+v stats %+v", res, res.Stats)
 	}
-	if got := codecs(t, in); got["romfs/big.txt"] != 1 {
+	if got := codecs(t, in); codec(t, got, "romfs/big.txt") != 1 {
 		t.Errorf("codecs = %v", got)
 	}
 }
@@ -298,7 +376,7 @@ func TestOptimizeMinSavings(t *testing.T) {
 	if _, err := Pack(ctx, pkgs, in, PackOptions{Level: 3, LargeRaw: true}); err != nil {
 		t.Fatal(err)
 	}
-	if codecs(t, in)["romfs/little"] != 1 {
+	if codec(t, codecs(t, in), "romfs/little") != 1 {
 		t.Fatal("fixture should start compressed")
 	}
 	opts := defaultOptions()
@@ -308,7 +386,7 @@ func TestOptimizeMinSavings(t *testing.T) {
 	if res.Status != "optimized" || res.Plan.PolicyFixes != 1 || res.Stats.Decompressed != 1 {
 		t.Fatalf("result = %+v stats %+v", res, res.Stats)
 	}
-	if codecs(t, opts.Output)["romfs/little"] != 0 {
+	if codec(t, codecs(t, opts.Output), "romfs/little") != 0 {
 		t.Errorf("a frame saving under 10%% should be stored raw")
 	}
 	assertSameContent(t, in, opts.Output, nil)
@@ -612,6 +690,37 @@ func TestOptimizeEstimateStratified(t *testing.T) {
 	}
 }
 
+// TestOptimizeProgressIsMonotonic: an incompressible file is read once for
+// the compression attempt and again to store it raw; progress must not go
+// back.
+func TestOptimizeProgressIsMonotonic(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.nup")
+	noise := make([]byte, 3<<20)
+	rand.New(rand.NewSource(6)).Read(noise)
+	pkgs := []nuptest.Package{{TitleID: testTID, Kind: 0, Files: []nuptest.File{{Path: "romfs/noise.bin", Data: noise}}}}
+	if err := nuptest.WriteKaiDump(in, pkgs, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []float64
+	opts := defaultOptions()
+	opts.Force = true
+	opts.Output = filepath.Join(dir, "out.nup")
+	opts.Progress = func(label string, pct float64) {
+		if label == "Optimizing NUP files" {
+			seen = append(seen, pct)
+		}
+	}
+	if res := optimizeT(t, in, opts); res.Stats.Incompressible != 1 {
+		t.Fatalf("stats = %+v", res.Stats)
+	}
+	for i := 1; i < len(seen); i++ {
+		if seen[i] < seen[i-1] {
+			t.Fatalf("progress went back from %.1f to %.1f", seen[i-1], seen[i])
+		}
+	}
+}
+
 // flipByte flips one byte of path at off.
 func flipByte(t *testing.T, path string, off int64) {
 	t.Helper()
@@ -706,15 +815,22 @@ func TestOptimizeCorruptReusedFrame(t *testing.T) {
 	}
 	payload := rec.off + int64(params.headerSize) + 3
 	flipByte(t, in, payload+(rec.off+rec.stored-payload)/2)
-	if _, err := Open(ctx, in); err != nil {
+	check, err := Open(ctx, in)
+	if err != nil {
 		t.Fatalf("corruption should keep the frame structurally valid: %v", err)
 	}
+	check.Close()
 	before := fileSHA(t, in)
 	opts := defaultOptions()
 	opts.InPlace = true
 	opts.Force = true
-	if _, err := Optimize(ctx, in, opts); err == nil {
-		t.Fatal("damaged frame was not detected")
+	_, err = Optimize(ctx, in, opts)
+	detected := false
+	for _, s := range []string{"SHA-256 mismatch", "CRC check failed", "zstd", "corrupt"} {
+		detected = detected || err != nil && strings.Contains(err.Error(), s)
+	}
+	if !detected {
+		t.Fatalf("damaged frame: err = %v, want a checksum or decoder failure", err)
 	}
 	if fileSHA(t, in) != before {
 		t.Errorf("failed optimization modified the source")
