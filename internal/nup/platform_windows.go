@@ -77,28 +77,123 @@ func prepareReplacement(string, string, os.FileInfo) error { return nil }
 
 var procReplaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
 
+// Partial-failure codes of ReplaceFileW (winerror.h).
+const (
+	errUnableToRemoveReplaced   = syscall.Errno(1175)
+	errUnableToMoveReplacement  = syscall.Errno(1176)
+	errUnableToMoveReplacement2 = syscall.Errno(1177)
+)
+
+// Hooks for tests that simulate ReplaceFileW's documented partial failures
+// and a failing recovery.
+var (
+	replaceFileW = func(replaced, replacement, backup string) error {
+		to, err := windows.UTF16PtrFromString(replaced)
+		if err != nil {
+			return err
+		}
+		from, err := windows.UTF16PtrFromString(replacement)
+		if err != nil {
+			return err
+		}
+		bak, err := windows.UTF16PtrFromString(backup)
+		if err != nil {
+			return err
+		}
+		r, _, e := procReplaceFileW.Call(uintptr(unsafe.Pointer(to)), uintptr(unsafe.Pointer(from)),
+			uintptr(unsafe.Pointer(bak)), 0, 0, 0)
+		if r == 0 {
+			return e
+		}
+		return nil
+	}
+	restoreBackup = commitNew // (MoveFileEx without replace: the path is empty when it runs)
+)
+
 // replaceFile swaps temporary over output with ReplaceFileW, which keeps the
 // replaced file's ACLs, attributes, creation time and streams (merge errors
-// are not ignored: a security descriptor that cannot be kept fails the
-// call). Without a backup name output is either the old file or the new
-// one; the replacement is flushed before the call returns.
+// are not ignored). ReplaceFileW is not atomic and its failures are not all
+// clean: with ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 (1177) the original has
+// already been moved away and nothing is at output. So the original is
+// always moved to a backup name in the same folder, and whatever the call
+// returns, the resulting state is inspected (by file identity) before
+// anything is reported or deleted:
+//
+//   - output holds the new file: success; the backup is deleted only then;
+//   - output still holds the original (1175, 1176 and other failures):
+//     failure, original kept;
+//   - output is empty and the backup is the original (1177): the backup is
+//     moved back and the run fails with the original kept; if that move
+//     fails too, both the backup and the optimized copy are kept and the
+//     error names them (keepFilesError);
+//   - anything else: failure, every file kept.
+//
+// The only recoverable copy of the original is never deleted.
 func replaceFile(temporary, output string) error {
-	from, err := windows.UTF16PtrFromString(temporary)
-	if err != nil {
-		return err
-	}
-	to, err := windows.UTF16PtrFromString(output)
-	if err != nil {
-		return err
-	}
 	if err := flushFile(temporary); err != nil {
 		return err
 	}
-	r, _, e := procReplaceFileW.Call(uintptr(unsafe.Pointer(to)), uintptr(unsafe.Pointer(from)), 0, 0, 0, 0)
-	if r == 0 {
-		return fmt.Errorf("Cannot replace the NUP (%v); the original was kept.", e)
+	orig, err := os.Stat(output)
+	if err != nil {
+		return err
 	}
-	return nil
+	repl, err := os.Stat(temporary)
+	if err != nil {
+		return err
+	}
+	backup := output + "." + randomHex() + ".boxcar-backup"
+	callErr := replaceFileW(output, temporary, backup)
+	return settleReplace(output, temporary, backup, orig, repl, callErr)
+}
+
+func settleReplace(output, temporary, backup string, orig, repl os.FileInfo, callErr error) error {
+	stat := func(p string) os.FileInfo {
+		if st, err := os.Stat(p); err == nil {
+			return st
+		}
+		return nil
+	}
+	out, tmp, bak := stat(output), stat(temporary), stat(backup)
+	isOrig := func(st os.FileInfo) bool { return st != nil && os.SameFile(st, orig) }
+	// The replacement normally keeps its own file ID; its size identifies
+	// it too, and it must have left its temporary name.
+	isNew := out != nil && !isOrig(out) && tmp == nil &&
+		(os.SameFile(out, repl) || out.Size() == repl.Size())
+	cause := "ReplaceFileW reported no error"
+	if callErr != nil {
+		cause = callErr.Error()
+	}
+	switch {
+	case isNew:
+		if bak != nil && isOrig(bak) {
+			_ = os.Remove(backup) // the original is no longer needed; a leftover is harmless
+		}
+		return nil
+	case isOrig(out):
+		if bak != nil && !isOrig(bak) {
+			_ = os.Remove(backup) // (not the original: nothing of value)
+		}
+		return fmt.Errorf("Cannot replace the NUP (%s); the original was kept.", cause)
+	case out == nil && isOrig(bak):
+		if rerr := restoreBackup(backup, output); rerr == nil && isOrig(stat(output)) {
+			return fmt.Errorf("Cannot replace the NUP (%s); the original was moved back and kept.", cause)
+		} else if rerr == nil {
+			rerr = errors.New("the restored file is not the original")
+			return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s), and restoring it failed (%v). "+
+				"The original is kept as %s and the verified optimized copy as %s; rename one of them to %s.",
+				cause, rerr, backup, temporary, output)}
+		} else {
+			return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s), and restoring it failed (%v). "+
+				"The original is kept as %s and the verified optimized copy as %s; rename one of them to %s.",
+				cause, rerr, backup, temporary, output)}
+		}
+	}
+	where := ""
+	if bak != nil {
+		where = " A copy is kept as " + backup + "."
+	}
+	return &keepFilesError{fmt.Sprintf("Cannot replace the NUP (%s) and the files are in an unexpected state; nothing was deleted.%s "+
+		"The verified optimized copy is %s.", cause, where, temporary)}
 }
 
 func flushFile(path string) error {

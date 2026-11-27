@@ -373,7 +373,12 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 		if cerr != nil {
 			return res, cerr
 		}
-		defer func() { _ = os.Remove(temp) }()
+		defer func() {
+			var keep *keepFilesError
+			if !errors.As(err, &keep) {
+				_ = os.Remove(temp)
+			}
+		}()
 		out = f
 	}
 	release, ferr := diskfree.ReserveFunc(filepath.Dir(final), written, r.plan.WorstCaseSize)
@@ -1208,3 +1213,9 @@ func (w *repackWriter) copyExtent(rec fileRecord) {
 	}
 	binfmt.Require(copied == rec.stored, "Truncated archive.")
 }
+
+// keepFilesError reports a failed replacement after which the temporary
+// file may be the only complete copy: the caller must not delete it.
+type keepFilesError struct{ msg string }
+
+func (e *keepFilesError) Error() string { return e.msg }

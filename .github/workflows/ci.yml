@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'cursor/**']
+  workflow_dispatch:
   pull_request:
 
 permissions:
@@ -22,7 +23,6 @@ jobs:
       - name: Check (build + vet + gofmt + tests)
         run: make check
       - name: Race detector
-        if: runner.os == 'Linux'
         run: make race
 
   golden:
@@ -60,9 +60,14 @@ jobs:
           go-version-file: go.mod
       - run: go build ./...
       - run: go vet ./...
+      # Native tests, including the ReplaceFileW in-place replacement and
+      # its simulated partial failures (internal/nup/replace_windows_test.go)
+      - name: Tests
+        run: go test ./internal/... ./cmd/... -count=1
+      - name: In-place replacement tests (verbose)
+        run: go test ./internal/nup/ -run 'ReplaceFile|InPlace' -count=1 -v
       # Cross-compile sanity: the format code must stay portable
       - run: go build ./...
         env:
           GOOS: linux
           GOARCH: arm64
-
