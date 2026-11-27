@@ -93,6 +93,12 @@ func TestReserveFlexible(t *testing.T) {
 		t.Errorf("after release: %d units, want 4", u)
 	}
 	b.release(90)
+	// zstd 19 under 512 MiB: read-ahead first (up to a quarter), then as
+	// many 56 MiB workers as fit
+	c := &budget{limit: 512}
+	if u, x, _, _ := c.reserveFlexible(t.Context(), 57, 56, 8, 2, 128); u != 5 || x != 128 {
+		t.Errorf("512 budget: %d workers, %d read-ahead; want 5, 128", u, x)
+	}
 	if _, _, total, _ := b.reserveFlexible(t.Context(), 500, 20, 2, 0, 0); total != 520 || b.used != 520 {
 		t.Errorf("oversize reservation alone: total %d used %d", total, b.used)
 	}

@@ -153,9 +153,13 @@ func (b *budget) reserveFlexible(ctx context.Context, fixed, unit int64, want in
 		need := fixed + unit + minExtra
 		if free >= need || b.used == 0 {
 			free = max64(free, need)
+			// Units (workers) get what is left after the extra (read-ahead)
+			// takes up to a quarter of the free memory, so a short budget
+			// gets fewer workers rather than workers with nothing to read.
+			keep := min64(wantExtra, max64(minExtra, free/4))
 			units = 1
 			if unit > 0 {
-				units = int(min64(int64(want), (free-fixed-minExtra)/unit))
+				units = int(max64(1, min64(int64(want), (free-fixed-keep)/unit)))
 			}
 			extra = min64(wantExtra, free-fixed-int64(units)*unit)
 			total = fixed + int64(units)*unit + extra
