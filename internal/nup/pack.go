@@ -72,19 +72,19 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 		total += f.source.size
 	}
 	binfmt.Require(uint64(total)+uint64(bloboff) <= 0xffffffffffffffff, "NUP payload exceeds its 64-bit size limit.")
-	free, err := diskfree.Available(filepath.Dir(output))
+	temp := output + "." + randomHex() + ".partial"
+	release, err := diskfree.Reserve(filepath.Dir(output), temp, total+bloboff)
 	if err != nil {
 		return res, err
 	}
-	binfmt.Require(free >= uint64(total)+uint64(bloboff)+32*1024*1024, "Not enough free space for the worst-case NUP size.")
-
-	temp := output + "." + randomHex() + ".partial"
-	defer func() { _ = os.Remove(temp) }()
-
+	defer release()
 	out, err := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
 	if err != nil {
 		return res, err
 	}
+	// Registered only once the exclusive create succeeded: a name that
+	// already existed belongs to someone else and must not be removed.
+	defer func() { _ = os.Remove(temp) }()
 	defer out.Close()
 
 	if err := writeZeros(out, bloboff); err != nil {
@@ -210,7 +210,7 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 		}
 	}
 	binfmt.Check(ctx)
-	if err := commitFile(temp, output); err != nil {
+	if err := commitNew(temp, output); err != nil {
 		return res, err
 	}
 	if opts.Progress != nil {
