@@ -19,6 +19,13 @@
   before the blob region) get a note from `optimize` and from
   `nup --nup-operation verify`/`inspect` (`notes` in their JSON), and
   `optimize` rewrites them into compliant archives.
+- **Optimizer safety hardening** (review fixes): in-place runs take an
+  advisory lock (macOS/Linux), refuse a source that was swapped for another
+  file even with the same size and time, and write the partial copy with
+  the original's permissions; outputs on exFAT/FAT32 are published with an
+  exclusive rename; policy violations in duplicate extents are rewritten;
+  rewrites match Pack's alignment byte for byte; `--no-latest-snapshot`
+  overrides `--latest-snapshot`.
 - **Faster NUP verification and extraction.** Read buffers and zstd
   decoders are reused across files, and alignment padding no longer
   allocates 1 MiB per extent; on a 67,000-file archive, verification went

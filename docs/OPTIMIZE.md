@@ -92,15 +92,21 @@ under `plan.deviations` (`notes` for verify/inspect).
 - The source is checked as it is read, including duplicate copies that
   deduplication drops. A damaged source fails the run instead of being
   silently repaired.
-- `--output` never overwrites an existing file. (On filesystems without hard
-  links, such as exFAT and FAT32 SD cards, the name is claimed first and
-  the claim is then replaced atomically.) `--in-place` replaces the
-  original only after verification, and only if the original's size and
-  modification time are unchanged, with a single atomic rename (POSIX
-  `rename`, Windows `MoveFileEx`). Permissions are kept where the
-  filesystem stores them. If the rewrite is not smaller, the original is
-  kept unless a policy fix, `--latest-snapshot` or `--force` requires the
-  rewrite.
+- `--output` never overwrites an existing file: the verified file is
+  published with a hard link, or on filesystems without hard links (exFAT
+  and FAT32 SD cards) with an exclusive rename. Only where neither exists
+  is the name reserved with an empty file for the instant before the
+  rename.
+- `--in-place` replaces the original only after verification, and only if
+  the path still holds the very file that was read (same file identity,
+  size and modification time), with a single atomic rename (POSIX
+  `rename`, Windows `MoveFileEx`). On macOS and Linux an advisory lock
+  stops a second optimization of the same archive, and the partial copy is
+  created with the original's permission bits, which the replacement
+  keeps. On Windows the replacement gets the folder's default permissions;
+  explicit access lists on the original are not copied. If the rewrite is
+  not smaller, the original is kept unless a policy fix, a spec deviation,
+  `--latest-snapshot` or `--force` requires the rewrite.
 - Errors and Ctrl-C remove the partial file and leave the original as it
   was. A second Ctrl-C exits immediately. After a hard kill or power loss the
   original is still intact; a stray `*.partial` file may remain and can be
