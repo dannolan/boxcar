@@ -55,6 +55,7 @@ func runOptimize(args []string) int {
 	dryRun := fs.Bool("dry-run", false, "only report what would change; write nothing")
 	recursive := fs.Bool("recursive", false, "also search subfolders")
 	jobs := fs.Int("jobs", 0, "archives optimized at the same time; 0 picks automatically")
+	memory := fs.String("memory", "auto", "working-memory budget shared by all archives, e.g. 512MiB; auto = 1/8 of RAM within 256 MiB..2 GiB (process RSS runs somewhat higher)")
 	profile := fs.String("profile", nup.DefaultProfile, "storage policy: runtime (nx2-flow), archive (smallest) or fast; the flags below override single settings")
 	preset := fs.String("preset", "Balanced", "zstd preset for files that get compressed: Fast, Balanced, Smaller or Best (default: the profile's)")
 	recompress := fs.Bool("recompress", false, "re-encode already-compressed files with --preset (keeps the smaller result; default: the profile's)")
@@ -148,6 +149,15 @@ func runOptimize(args []string) int {
 		fmt.Fprintln(os.Stderr, "boxcar optimize: --jobs must be 0 (automatic) or more")
 		return 1
 	}
+	var memoryBudget int64
+	if m := strings.ToLower(*memory); m != "auto" && m != "" {
+		v, err := parseSize(*memory)
+		if err != nil || v < 16<<20 {
+			fmt.Fprintf(os.Stderr, "boxcar optimize: invalid --memory %q (a size of at least 16MiB, or auto)\n", *memory)
+			return 1
+		}
+		memoryBudget = v
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -162,6 +172,7 @@ func runOptimize(args []string) int {
 		Profile:        strings.ToLower(*profile),
 		Recursive:      *recursive,
 		Jobs:           *jobs,
+		MemoryBudget:   memoryBudget,
 		Output:         *output,
 		InPlace:        *inPlace,
 		DryRun:         *dryRun,

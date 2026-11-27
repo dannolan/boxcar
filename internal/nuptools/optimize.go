@@ -26,6 +26,9 @@ type OptimizeOptions struct {
 	// Jobs is how many archives are optimized at once; 0 chooses
 	// automatically (see autoJobs).
 	Jobs int
+	// MemoryBudget sets the process-wide working-memory budget in bytes
+	// (nup.SetMemoryBudget); 0 keeps the current one (automatic by default).
+	MemoryBudget int64
 	// Output is a .nup path when exactly one archive is selected, otherwise
 	// a directory that receives the archives under their relative paths.
 	// Leave it empty with InPlace or DryRun.
@@ -92,7 +95,8 @@ type Policy struct {
 	MinSavings         float64 `json:"min_savings"`
 	Recompress         bool    `json:"recompress"`
 	Jobs               int     `json:"jobs"`
-	SplitSize          int64   `json:"split_size"` // 0: parts only on FAT volumes; -1: never
+	SplitSize          int64   `json:"split_size"`    // 0: parts only on FAT volumes; -1: never
+	MemoryBudget       int64   `json:"memory_budget"` // bytes of working memory shared by all archives
 }
 
 // BatchResult is the outcome of Optimize.
@@ -133,6 +137,9 @@ func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (Batch
 		return result, err
 	}
 
+	if opts.MemoryBudget > 0 {
+		nup.SetMemoryBudget(opts.MemoryBudget)
+	}
 	jobs := opts.Jobs
 	if jobs <= 0 {
 		jobs = autoJobs(targets, opts)
@@ -147,7 +154,8 @@ func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (Batch
 		level = 3
 	}
 	result.Policy = Policy{Profile: opts.Profile, Level: level, LargeFilesRaw: opts.LargeRaw, LargeFileThreshold: threshold,
-		MinSavings: opts.MinSavings, Recompress: opts.Recompress, Jobs: jobs, SplitSize: opts.SplitSize}
+		MinSavings: opts.MinSavings, Recompress: opts.Recompress, Jobs: jobs, SplitSize: opts.SplitSize,
+		MemoryBudget: nup.MemoryBudget()}
 	var total int64
 	for _, t := range targets {
 		total += t.size
