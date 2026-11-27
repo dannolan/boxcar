@@ -35,7 +35,8 @@ type dirRecord struct {
 type archiveStamp struct {
 	size  int64
 	mtime int64
-	info  os.FileInfo // identity of the file that was opened
+	info  os.FileInfo // identity of the file that was opened (nil for an archive in parts)
+	parts []partStamp // every file read, in order (one for a whole file)
 }
 
 type extentKey struct{ off, end int64 }
@@ -56,7 +57,7 @@ type verifyKey struct {
 // Archive is an opened, parsed NUP v1 archive.
 type Archive struct {
 	path     string
-	f        *os.File
+	f        archiveFile
 	stamp    archiveStamp
 	packages []Package
 	files    []fileRecord
@@ -72,12 +73,44 @@ type Archive struct {
 	metaBeforeBlob, emptyOffsets int
 }
 
-// Open parses a NUP archive (port of nup_format.Archive.__init__).
+type archiveFile interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// Open parses a NUP archive (port of nup_format.Archive.__init__). path is
+// a whole file, the first part of an archive in parts, or a folder holding
+// one archive's parts (see FindParts).
 func Open(ctx context.Context, path string) (a *Archive, err error) {
-	defer binfmt.Recover(&err)
-	f, err := os.Open(path)
+	parts, _, err := FindParts(path)
 	if err != nil {
 		return nil, err
+	}
+	return openParts(ctx, path, parts)
+}
+
+// openParts parses the archive made of parts, read in order as one file.
+func openParts(ctx context.Context, path string, parts []string) (a *Archive, err error) {
+	defer binfmt.Recover(&err)
+	var f archiveFile
+	var stamps []partStamp
+	if len(parts) == 1 {
+		file, err := os.Open(parts[0])
+		if err != nil {
+			return nil, err
+		}
+		st, err := file.Stat()
+		if err != nil {
+			file.Close()
+			return nil, err
+		}
+		f, stamps = file, []partStamp{{path: parts[0], size: st.Size(), mtime: st.ModTime().UnixNano(), info: st}}
+	} else {
+		r, st, err := openPartsReader(parts)
+		if err != nil {
+			return nil, err
+		}
+		f, stamps = r, st
 	}
 	success := false
 	defer func() {
@@ -86,14 +119,25 @@ func Open(ctx context.Context, path string) (a *Archive, err error) {
 		}
 	}()
 	a = &Archive{path: path, f: f}
-	st, err := f.Stat()
-	if err != nil {
-		return nil, err
+	a.stamp = archiveStamp{parts: stamps}
+	for _, p := range stamps {
+		a.stamp.size += p.size
 	}
-	a.stamp = archiveStamp{size: st.Size(), mtime: st.ModTime().UnixNano(), info: st}
+	if len(stamps) == 1 {
+		a.stamp.mtime, a.stamp.info = stamps[0].mtime, stamps[0].info
+	}
 	a.parse(ctx)
 	success = true
 	return a, nil
+}
+
+// Parts lists the files the archive was read from, in order.
+func (a *Archive) Parts() []string {
+	out := make([]string, len(a.stamp.parts))
+	for i, p := range a.stamp.parts {
+		out[i] = p.path
+	}
+	return out
 }
 
 // Close releases the archive file handle.
@@ -137,12 +181,14 @@ func (a *Archive) readAt(off, size int64) []byte {
 }
 
 func (a *Archive) unchanged() error {
-	st, err := os.Stat(a.path)
-	if err != nil {
-		return err
-	}
-	if st.Size() != a.stamp.size || st.ModTime().UnixNano() != a.stamp.mtime {
-		return errors.New("NUP changed while reading.")
+	for _, p := range a.stamp.parts {
+		st, err := os.Stat(p.path)
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(st, p.info) || st.Size() != p.size || st.ModTime().UnixNano() != p.mtime {
+			return errors.New("NUP changed while reading.")
+		}
 	}
 	return nil
 }

@@ -37,6 +37,10 @@ type OptimizeOptions struct {
 	// named explicitly. Explicitly named archives are also measured by a
 	// real rewrite when the estimate is uncertain (nup.OptimizeOptions.Measure).
 	MinGain float64
+	// SplitSize is nup.OptimizeOptions.SplitSize: 0 writes parts of
+	// nup.FAT32PartSize only on FAT volumes, a positive size writes parts of
+	// that size, a negative one never splits.
+	SplitSize int64
 	// LatestSnapshot consolidates base and updates into one runnable game
 	// (content-altering, so it is opt-in), as pack --latest-snapshot does.
 	LatestSnapshot bool
@@ -87,6 +91,7 @@ type Policy struct {
 	MinSavings         float64 `json:"min_savings"`
 	Recompress         bool    `json:"recompress"`
 	Jobs               int     `json:"jobs"`
+	SplitSize          int64   `json:"split_size"` // 0: parts only on FAT volumes; -1: never
 }
 
 // BatchResult is the outcome of Optimize.
@@ -141,7 +146,7 @@ func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (Batch
 		level = 3
 	}
 	result.Policy = Policy{Profile: opts.Profile, Level: level, LargeFilesRaw: opts.LargeRaw, LargeFileThreshold: threshold,
-		MinSavings: opts.MinSavings, Recompress: opts.Recompress, Jobs: jobs}
+		MinSavings: opts.MinSavings, Recompress: opts.Recompress, Jobs: jobs, SplitSize: opts.SplitSize}
 	var total int64
 	for _, t := range targets {
 		total += t.size
@@ -177,6 +182,7 @@ func Optimize(ctx context.Context, inputs []string, opts OptimizeOptions) (Batch
 				Force:         opts.Force,
 				MinGain:       opts.MinGain,
 				Measure:       t.explicit,
+				SplitSize:     opts.SplitSize,
 			}
 			if o.MinGain < 0 {
 				o.MinGain = 1
@@ -282,17 +288,47 @@ func findArchives(inputs []string, recursive bool, outputDir string) ([]optimize
 		}
 		seen[path] = len(targets)
 		t := optimizeTarget{path: path, rel: rel, err: err}
-		if err == nil {
-			if st, serr := os.Stat(path); serr == nil {
-				t.size = st.Size()
-			}
-		}
 		targets = append(targets, t)
 		return len(targets) - 1
 	}
+	// archive adds the archive a path stands for: a whole file, the first
+	// part of an archive in parts, or a folder of one archive's parts (see
+	// nup.FindParts). Its output is named after the whole file.
+	archive := func(path, rel string) int {
+		parts, name, err := nup.FindParts(path)
+		if err != nil {
+			return add(path, rel, err)
+		}
+		i := add(path, filepath.Join(filepath.Dir(rel), name), nil)
+		var size int64
+		for _, p := range parts {
+			if st, serr := os.Stat(p); serr == nil {
+				size += st.Size()
+			}
+		}
+		targets[i].size = size
+		return i
+	}
 	isNup := func(name string) bool { return strings.EqualFold(filepath.Ext(name), ".nup") }
 	linkErr := errors.New("Linked input files are not supported.")
-	splitErr := errors.New("This .nup is a folder (a NUP split into parts); join the parts into one file first.")
+	// gameFolder: a folder that is one archive's parts: named *.nup (the
+	// console's own way), or holding nameless parts 00, 01, ...
+	gameFolder := func(path string) bool {
+		if isNup(path) {
+			return true
+		}
+		parts, _, err := nup.FindParts(path)
+		return err == nil && len(parts) > 0 && strings.Trim(filepath.Base(parts[0]), "0123456789") == ""
+	}
+	// fileEntry: a file found in a folder that is an archive's whole file or
+	// first part; later parts, and names that only look like parts, are not.
+	fileEntry := func(path string) bool {
+		parts, _, err := nup.FindParts(path)
+		if errors.Is(err, nup.ErrLaterPart) {
+			return false
+		}
+		return isNup(path) || err == nil && len(parts) > 1
+	}
 
 	for _, input := range inputs {
 		abs, err := filepath.Abs(input)
@@ -306,9 +342,9 @@ func findArchives(inputs []string, recursive bool, outputDir string) ([]optimize
 		case st.Mode()&os.ModeSymlink != 0 || isLinked(abs):
 			add(abs, filepath.Base(abs), linkErr)
 		case !st.IsDir():
-			targets[add(abs, filepath.Base(abs), nil)].explicit = true
-		case isNup(abs):
-			add(abs, filepath.Base(abs), splitErr)
+			targets[archive(abs, filepath.Base(abs))].explicit = true
+		case gameFolder(abs):
+			targets[archive(abs, filepath.Base(abs))].explicit = true
 		case recursive:
 			werr := filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
 				rel, _ := filepath.Rel(abs, p)
@@ -322,17 +358,17 @@ func findArchives(inputs []string, recursive bool, outputDir string) ([]optimize
 				if d.IsDir() && p != abs && outputDir != "" && sameDir(p, outputDir) {
 					return fs.SkipDir
 				}
-				if d.IsDir() && p != abs && isNup(d.Name()) {
-					add(p, rel, splitErr)
+				if d.IsDir() && p != abs && gameFolder(p) {
+					archive(p, rel)
 					return fs.SkipDir
 				}
-				if d.IsDir() || !isNup(d.Name()) {
+				if d.IsDir() || !fileEntry(p) {
 					return nil
 				}
 				if d.Type()&fs.ModeSymlink != 0 {
 					add(p, rel, linkErr)
 				} else if d.Type().IsRegular() {
-					add(p, rel, nil)
+					archive(p, rel)
 				}
 				return nil
 			})
@@ -348,13 +384,15 @@ func findArchives(inputs []string, recursive bool, outputDir string) ([]optimize
 			for _, e := range entries {
 				p := filepath.Join(abs, e.Name())
 				switch {
-				case !isNup(e.Name()):
 				case e.IsDir():
-					add(p, e.Name(), splitErr)
+					if isNup(e.Name()) {
+						archive(p, e.Name())
+					}
+				case !fileEntry(p):
 				case e.Type()&fs.ModeSymlink != 0:
 					add(p, e.Name(), linkErr)
 				case e.Type().IsRegular():
-					add(p, e.Name(), nil)
+					archive(p, e.Name())
 				}
 			}
 		}

@@ -227,7 +227,7 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 	}, nil
 }
 
-func writeZeros(out *os.File, n int64) error {
+func writeZeros(out io.Writer, n int64) error {
 	if n <= 0 {
 		return nil
 	}

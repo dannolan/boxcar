@@ -173,6 +173,8 @@ func TestOptimizeCommandErrors(t *testing.T) {
 		{"optimize", in, "--dry-run", "--large-file-threshold", "big"},
 		{"optimize", in, "--dry-run", "--jobs", "-1"},
 		{"optimize", in, "--dry-run", "--profile", "tiny"},
+		{"optimize", in, "--dry-run", "--split", "100"},
+		{"optimize", in, "--in-place", "--split", "1MiB"},
 		{"optimize", dir, "--dry-run"},
 	} {
 		if code := run(args); code != 1 {
@@ -356,5 +358,52 @@ func TestOptimizeProfiles(t *testing.T) {
 		if p.Level != c.level || p.Raw != c.raw || p.Threshold != c.threshold || p.MinSavings != c.savings || p.Recompress != c.recompr {
 			t.Errorf("%v: policy = %+v", c.args, p)
 		}
+	}
+}
+
+// TestOptimizeSplitCommand: --split writes nx2-flow-style parts, and the
+// first part is accepted wherever an archive is (verify, optimize).
+func TestOptimizeSplitCommand(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "game.nup")
+	noise := make([]byte, 100000)
+	rand.New(rand.NewSource(1)).Read(noise)
+	files := []nuptest.File{
+		{Path: "exefs/main.npdm", Data: buildNPDM(cliTID)},
+		{Path: "romfs/noise.bin", Data: noise},
+		{Path: "romfs/text.txt", Data: bytes.Repeat([]byte("hello optimizer\n"), 5000)},
+	}
+	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: cliTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out", "game.nup")
+	report := filepath.Join(dir, "r.json")
+	if code := run([]string{"optimize", in, "--output", out, "--split", "32KiB", "--result-json", report}); code != 0 {
+		t.Fatalf("optimize --split = %d", code)
+	}
+	var res struct {
+		Policy struct {
+			SplitSize int64 `json:"split_size"`
+		}
+		Archives []struct {
+			Output string
+			Parts  []string
+		}
+	}
+	data, _ := os.ReadFile(report)
+	if err := json.Unmarshal(data, &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Policy.SplitSize != 32<<10 || len(res.Archives) != 1 || len(res.Archives[0].Parts) != 4 || res.Archives[0].Output != out+".001" {
+		t.Fatalf("result = %s", data)
+	}
+	if code := run([]string{"nup", "--nup-operation", "verify", "--input", out + ".001"}); code != 0 {
+		t.Errorf("verify of the first part = %d", code)
+	}
+	if code := run([]string{"optimize", out + ".001", "--dry-run"}); code != 0 {
+		t.Errorf("dry run of the first part = %d", code)
+	}
+	if code := run([]string{"optimize", out + ".002", "--dry-run"}); code != 1 {
+		t.Errorf("dry run of a later part = %d, want 1", code)
 	}
 }

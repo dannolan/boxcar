@@ -62,7 +62,8 @@ func shaOf(t *testing.T, path string) [32]byte {
 //	lib/broken.nup         not a NUP
 //	lib/notes.txt          ignored
 //	lib/sub/c.nup          KaiDump-style, compressible
-//	lib/sub/split.nup/00   a NUP kept as split parts
+//	lib/d.nup.001, .002    KaiDump-style, compressible, in two parts
+//	lib/sub/split.nup/00   KaiDump-style, in nameless parts (00, 01)
 func library(t *testing.T) string {
 	t.Helper()
 	lib := filepath.Join(t.TempDir(), "lib")
@@ -81,7 +82,26 @@ func library(t *testing.T) string {
 	if _, err := nup.Pack(context.Background(), b, filepath.Join(lib, "b.nup"), nup.PackOptions{Level: 3, LargeRaw: true}); err != nil {
 		t.Fatal(err)
 	}
-	for name, data := range map[string]string{"broken.nup": "not a nup", "notes.txt": "hi", "sub/split.nup/00": "part"} {
+	for name, title := range map[string]string{"d.nup": "Game D", "sub/split.nup/00": "Game S"} {
+		whole := filepath.Join(t.TempDir(), "whole.nup")
+		if err := nuptest.WriteKaiDump(whole, kaiDumpGame(title), nuptest.Options{}); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(whole)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, second := name+".001", name+".002"
+		if strings.HasSuffix(name, "/00") {
+			first, second = name, strings.TrimSuffix(name, "00")+"01"
+		}
+		for part, bytes := range map[string][]byte{first: data[:len(data)/2], second: data[len(data)/2:]} {
+			if err := os.WriteFile(filepath.Join(lib, filepath.FromSlash(part)), bytes, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for name, data := range map[string]string{"broken.nup": "not a nup", "notes.txt": "hi"} {
 		if err := os.WriteFile(filepath.Join(lib, filepath.FromSlash(name)), []byte(data), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -111,13 +131,14 @@ func TestOptimizeBatchDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := byName(res)
-	if len(got) != 3 || got["a.nup"].Status != "planned" || got["b.nup"].Status != "planned" || got["broken.nup"].Status != "failed" {
+	if len(got) != 4 || got["a.nup"].Status != "planned" || got["b.nup"].Status != "planned" || got["broken.nup"].Status != "failed" ||
+		got["d.nup.001"].Status != "planned" || got["d.nup.001"].SavedBytes <= 0 {
 		t.Fatalf("non-recursive dry run: %+v", got)
 	}
 	if !strings.Contains(got["b.nup"].Reason, "already optimized") || got["a.nup"].SavedBytes <= 0 {
 		t.Errorf("verdicts: a=%q b=%q", got["a.nup"].Reason, got["b.nup"].Reason)
 	}
-	if s := res.Summary; s.Archives != 3 || s.Planned != 2 || s.Failed != 1 || s.SavedBytes <= 0 {
+	if s := res.Summary; s.Archives != 4 || s.Planned != 3 || s.Failed != 1 || s.SavedBytes <= 0 {
 		t.Errorf("summary = %+v", s)
 	}
 
@@ -127,7 +148,7 @@ func TestOptimizeBatchDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = byName(res)
-	if len(got) != 5 || got["c.nup"].Status != "planned" || !strings.Contains(got["split.nup"].Error, "split into parts") {
+	if len(got) != 6 || got["c.nup"].Status != "planned" || got["split.nup"].Status != "planned" {
 		t.Fatalf("recursive dry run: %+v", got)
 	}
 	if shaOf(t, filepath.Join(lib, "a.nup")) != before {
@@ -157,7 +178,7 @@ func TestOptimizeBatchInPlace(t *testing.T) {
 		defer mu.Unlock()
 		overall = append(overall, p.Overall)
 		seen[p.Index] = true
-		if p.Count != 5 || p.Percent < 0 || p.Percent > 100 {
+		if p.Count != 6 || p.Percent < 0 || p.Percent > 100 {
 			t.Errorf("progress = %+v", p)
 		}
 	}
@@ -175,11 +196,12 @@ func TestOptimizeBatchInPlace(t *testing.T) {
 	}
 	got := byName(res)
 	if got["a.nup"].Status != "optimized" || got["c.nup"].Status != "optimized" || got["b.nup"].Status != "skipped" ||
-		got["broken.nup"].Status != "failed" || got["split.nup"].Status != "failed" {
+		got["broken.nup"].Status != "failed" || got["split.nup"].Status != "failed" || got["d.nup.001"].Status != "failed" ||
+		!strings.Contains(got["split.nup"].Error, "in place") {
 		t.Fatalf("statuses: %+v", got)
 	}
 	s := res.Summary
-	if s.Archives != 5 || s.Optimized != 2 || s.Skipped != 1 || s.Failed != 2 || s.SavedBytes <= 0 ||
+	if s.Archives != 6 || s.Optimized != 2 || s.Skipped != 1 || s.Failed != 3 || s.SavedBytes <= 0 ||
 		s.SavedBytes != got["a.nup"].SavedBytes+got["c.nup"].SavedBytes {
 		t.Errorf("summary = %+v", s)
 	}
@@ -191,7 +213,7 @@ func TestOptimizeBatchInPlace(t *testing.T) {
 	if shaOf(t, filepath.Join(lib, "b.nup")) != bBefore {
 		t.Errorf("skipped archive was rewritten")
 	}
-	if len(finished) != 5 || len(seen) < 3 {
+	if len(finished) != 6 || len(seen) < 3 {
 		t.Errorf("finished %v, progress seen for %v", finished, seen)
 	}
 	if !sort.Float64sAreSorted(overall) || overall[len(overall)-1] > 100 {
@@ -214,12 +236,14 @@ func TestOptimizeBatchOutputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Summary.Optimized != 2 {
+	if res.Summary.Optimized != 4 {
 		t.Fatalf("summary = %+v", res.Summary)
 	}
-	for _, rel := range []string{"a.nup", "sub/c.nup"} {
+	// Archives in parts are written whole (they fit one part), named after
+	// the whole file.
+	for rel, src := range map[string]string{"a.nup": "a.nup", "sub/c.nup": "sub/c.nup", "d.nup": "d.nup.001", "sub/split.nup": "sub/split.nup"} {
 		p := filepath.Join(out, filepath.FromSlash(rel))
-		if digestOf(t, p) != digestOf(t, filepath.Join(lib, filepath.FromSlash(rel))) {
+		if digestOf(t, p) != digestOf(t, filepath.Join(lib, filepath.FromSlash(src))) {
 			t.Errorf("%s: content differs", rel)
 		}
 	}
@@ -262,8 +286,8 @@ func TestOptimizeBatchSkipsOwnOutputFolder(t *testing.T) {
 				t.Errorf("dry run %v picked up an output: %s", dryRun, a.Input)
 			}
 		}
-		if res.Summary.Archives != 5 {
-			t.Errorf("dry run %v: %d archives, want the 5 originals", dryRun, res.Summary.Archives)
+		if res.Summary.Archives != 6 {
+			t.Errorf("dry run %v: %d archives, want the 6 originals", dryRun, res.Summary.Archives)
 		}
 	}
 }

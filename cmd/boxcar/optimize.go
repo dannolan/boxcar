@@ -66,6 +66,7 @@ func runOptimize(args []string) int {
 	force := fs.Bool("force", false, "rewrite archives even when they look already optimized")
 	latest := fs.Bool("latest-snapshot", false, "merge base and updates into one runnable game (changes content; opt-in)")
 	noLatest := fs.Bool("no-latest-snapshot", false, "keep every package (default)")
+	split := fs.String("split", "auto", "write each output in parts (name.nup.001, ...) of this size, e.g. 2GiB; fat32 = 4 GiB - 64 KiB; auto = fat32 on FAT volumes only; none")
 	resultJSON := fs.String("result-json", "", "also write the JSON result to this new file")
 
 	rest := args
@@ -124,6 +125,25 @@ func runOptimize(args []string) int {
 		fmt.Fprintln(os.Stderr, "boxcar optimize: --in-place and --output are mutually exclusive")
 		return 1
 	}
+	var splitSize int64
+	switch strings.ToLower(*split) {
+	case "auto", "":
+	case "none", "off", "no":
+		splitSize = -1
+	case "fat32":
+		splitSize = nup.FAT32PartSize
+	default:
+		v, err := parseSize(*split)
+		if err != nil || v < nup.MinPartSize {
+			fmt.Fprintf(os.Stderr, "boxcar optimize: invalid --split %q (a size of at least %d bytes, fat32, auto or none)\n", *split, nup.MinPartSize)
+			return 1
+		}
+		splitSize = v
+	}
+	if splitSize > 0 && *inPlace {
+		fmt.Fprintln(os.Stderr, "boxcar optimize: --split needs --output (an in-place rewrite is never split)")
+		return 1
+	}
 	if *jobs < 0 {
 		fmt.Fprintln(os.Stderr, "boxcar optimize: --jobs must be 0 (automatic) or more")
 		return 1
@@ -147,6 +167,7 @@ func runOptimize(args []string) int {
 		DryRun:         *dryRun,
 		Force:          *force,
 		MinGain:        gain,
+		SplitSize:      splitSize,
 		LatestSnapshot: *latest && !*noLatest,
 		Progress:       printer.progress,
 		Finished:       printer.finished,
@@ -238,6 +259,9 @@ func (p *progressPrinter) finished(index, count int, r nuptools.ArchiveResult) {
 		where := "replaced in place"
 		if !r.InPlace {
 			where = "written to " + r.Output
+			if len(r.Parts) > 1 {
+				where += fmt.Sprintf(" and %d more part(s)", len(r.Parts)-1)
+			}
 		}
 		p.println(fmt.Sprintf("%s %s %s; %s\n    verified; logical SHA-256 %s -> %s", head, r.Status, change(r.SizeBefore, r.SizeAfter), where,
 			short(r.LogicalSHA256), short(r.OutputLogicalSHA256)))

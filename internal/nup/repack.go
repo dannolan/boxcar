@@ -65,6 +65,12 @@ type OptimizeOptions struct {
 	// MinGain is the estimated saving, in percent of the archive size,
 	// below which an archive counts as already optimized.
 	MinGain float64
+	// SplitSize writes the output as numbered parts of this many bytes
+	// ("Game.nup.001", ...; nx2-flow's convention) when it is larger than
+	// one part. 0 splits at FAT32PartSize only when the output folder is
+	// on a FAT volume, where a file of 4 GiB cannot exist; a negative value
+	// never splits. In-place rewrites are never split.
+	SplitSize int64
 	// Measure turns an uncertain "already optimized" verdict (sampled
 	// estimate, or recompression whose gain is unknown) into a real rewrite
 	// whose measured size decides: the result is kept only if it saves at
@@ -148,6 +154,7 @@ type RepackStats struct {
 type OptimizeResult struct {
 	Input               string       `json:"input"`
 	Output              string       `json:"output,omitempty"`
+	Parts               []string     `json:"parts,omitempty"` // the output's parts, when it was written in parts (Output is the first)
 	Status              string       `json:"status"`
 	Action              string       `json:"action,omitempty"`
 	Reason              string       `json:"reason,omitempty"`
@@ -224,6 +231,15 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	}
 	res = OptimizeResult{Input: abs, InPlace: opts.InPlace}
 	binfmt.Require(!isLinked(abs), "Linked input files are not supported.")
+	inParts, _, perr := FindParts(abs)
+	if perr != nil {
+		return res, perr
+	}
+	for _, p := range inParts {
+		binfmt.Require(!isLinked(p), "Linked input files are not supported.")
+	}
+	binfmt.Require(!opts.InPlace || len(inParts) == 1 && inParts[0] == abs,
+		"An archive in parts cannot be replaced in place; write it to --output.")
 	if opts.InPlace && !opts.DryRun {
 		unlock, lerr := lockSource(abs)
 		if lerr != nil {
@@ -233,7 +249,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	}
 
 	report("Analyzing NUP", 0)
-	a, oerr := Open(ctx, abs)
+	a, oerr := openParts(ctx, abs, inParts)
 	if oerr != nil {
 		return res, oerr
 	}
@@ -317,23 +333,55 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 			return res, aerr
 		}
 		binfmt.Require(strings.ToLower(filepath.Ext(final)) == ".nup", "Output must end in .nup.")
-		binfmt.Require(!sameFile(final, abs), "Output is the input archive; use in-place mode to replace it.")
-		binfmt.Require(!pathExists(final), "Output already exists; choose a new filename.")
+		for _, p := range inParts {
+			binfmt.Require(!sameFile(final, p), "Output is the input archive; use in-place mode to replace it.")
+		}
 		if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
 			return res, err
 		}
+		if err := partsCollide(final); err != nil {
+			return res, err
+		}
 	}
-	temp := final + "." + randomHex() + ".partial"
-	release, ferr := diskfree.Reserve(filepath.Dir(final), temp, r.plan.WorstCaseSize)
+	split := opts.SplitSize
+	if opts.InPlace || split < 0 {
+		split = 0
+	} else if split == 0 {
+		if fat, _ := diskfree.IsFAT(filepath.Dir(final)); fat {
+			split = FAT32PartSize
+		}
+	}
+	tag := randomHex()
+	temp := final + "." + tag + ".partial"
+	var out outFile
+	var parts *partWriter
+	written := func() int64 {
+		if st, err := os.Stat(temp); err == nil {
+			return st.Size()
+		}
+		return 0
+	}
+	if split > 0 {
+		pw, perr := newPartWriter(final, tag, split, mode)
+		if perr != nil {
+			return res, perr
+		}
+		defer pw.removeTemps()
+		out, parts, written = pw, pw, pw.written
+	} else {
+		f, cerr := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
+		if cerr != nil {
+			return res, cerr
+		}
+		defer func() { _ = os.Remove(temp) }()
+		out = f
+	}
+	release, ferr := diskfree.ReserveFunc(filepath.Dir(final), written, r.plan.WorstCaseSize)
 	if ferr != nil {
+		out.Close()
 		return res, ferr
 	}
 	defer release()
-	out, cerr := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
-	if cerr != nil {
-		return res, cerr
-	}
-	defer func() { _ = os.Remove(temp) }()
 	stats, werr := r.write(out, func(done, total int64) {
 		report("Optimizing NUP files", 2+78*float64(done)/float64(max64(total, 1)))
 	})
@@ -349,7 +397,11 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	}
 
 	report("Verifying optimized NUP", 80)
-	b, verr := Open(ctx, temp)
+	temps := []string{temp}
+	if parts != nil {
+		temps = parts.temps()
+	}
+	b, verr := openParts(ctx, temp, temps)
 	if verr != nil {
 		return res, verr
 	}
@@ -367,11 +419,14 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	res.Verified = true
 	res.OutputLogicalSHA256 = LogicalDigest(got)
 	res.Stats = &stats
-	st, serr := os.Stat(temp)
-	if serr != nil {
-		return res, serr
+	res.SizeAfter = 0
+	for _, p := range temps {
+		st, serr := os.Stat(p)
+		if serr != nil {
+			return res, serr
+		}
+		res.SizeAfter += st.Size()
 	}
-	res.SizeAfter = st.Size()
 	res.SavedBytes = res.SizeBefore - res.SizeAfter
 
 	binfmt.Check(ctx)
@@ -397,6 +452,20 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 		closeSource()
 		if err := replaceSource(abs, temp, a.stamp); err != nil {
 			return res, err
+		}
+	} else if parts != nil {
+		finals := parts.finals()
+		if len(finals) > 1 {
+			if err := partsCollide(final); err != nil {
+				return res, err
+			}
+		}
+		if err := publishParts(temps, finals); err != nil {
+			return res, err
+		}
+		final = finals[0]
+		if len(finals) > 1 {
+			res.Parts = finals
 		}
 	} else if err := commitNew(temp, final); err != nil {
 		return res, err
@@ -830,7 +899,7 @@ var errFrameTooLarge = errors.New("zstd frame exceeds its size limit")
 
 // sink appends to the output file and tracks the write position.
 type sink struct {
-	f   *os.File
+	f   outFile
 	pos int64
 }
 
@@ -892,7 +961,18 @@ func (w *repackWriter) progress(done int64) {
 }
 
 // write streams every extent, the metadata and the TOC into out.
-func (r *repacking) write(out *os.File, report func(done, total int64)) (stats RepackStats, err error) {
+// outFile is what the writer needs from its output: an *os.File, or a
+// partWriter for an archive written in parts.
+type outFile interface {
+	io.Writer
+	io.WriterAt
+	io.Seeker
+	Truncate(size int64) error
+	Sync() error
+	Close() error
+}
+
+func (r *repacking) write(out outFile, report func(done, total int64)) (stats RepackStats, err error) {
 	defer binfmt.Recover(&err)
 	w := &repackWriter{repacking: r, out: &sink{f: out}, buf: make([]byte, Block), report: report}
 	defer func() {
