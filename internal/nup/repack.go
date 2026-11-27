@@ -431,15 +431,22 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 
 	binfmt.Check(ctx)
 	fixes := res.ContentChanged || res.Plan.PolicyFixes > 0 || len(res.Plan.Deviations) > 0
-	if measuring {
+	// An estimate can be wrong both ways (sampled windows may compress
+	// although their whole files do not), so unless the rewrite is
+	// required (a fix) or forced, the measured size decides: a rewrite that
+	// does not save the minimum gain is discarded. This keeps repeated runs
+	// from writing same-size copies (idempotence).
+	if !fixes && !opts.Force {
 		need := max64(int64(math.Ceil(float64(res.SizeBefore)*opts.MinGain/100)), 1)
 		if res.SavedBytes < need {
-			reason := fmt.Sprintf("already optimized: a full rewrite saved %d bytes (%.2f%%), below the %g%% minimum gain; nothing was written",
-				res.SavedBytes, 100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), opts.MinGain)
+			reason := fmt.Sprintf("already optimized: a full rewrite saved %d bytes (%.2f%%), less than the minimum gain of %d bytes (%g%%); nothing was written",
+				res.SavedBytes, 100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), need, opts.MinGain)
 			return skipped(res, reason, report), nil
 		}
-		res.Reason = fmt.Sprintf("measured: a full rewrite saved %.2f%% although the %s estimate was below the minimum gain",
-			100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), r0basis(res.Plan))
+		if measuring && !recompressOnly {
+			res.Reason = fmt.Sprintf("measured: a full rewrite saved %.2f%% although the %s estimate was below the minimum gain",
+				100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), r0basis(res.Plan))
+		}
 		if recompressOnly {
 			res.Reason = fmt.Sprintf("measured: recompressing saved %.2f%%", 100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)))
 		}
