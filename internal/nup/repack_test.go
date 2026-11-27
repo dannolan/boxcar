@@ -558,6 +558,7 @@ func TestOptimizeNormalizesDeviations(t *testing.T) {
 	if d := a.Deviations(); len(d) != 1 || !strings.Contains(d[0], "1 empty file(s) have a nonzero extent offset") {
 		t.Fatalf("Deviations = %q", d)
 	}
+	a.Close() // (Windows cannot replace a file open elsewhere)
 	opts := defaultOptions()
 	opts.InPlace = true
 	opts.DryRun = true
@@ -569,9 +570,11 @@ func TestOptimizeNormalizesDeviations(t *testing.T) {
 	if res = optimizeT(t, in, opts); res.Status != "normalized" || !res.Verified {
 		t.Fatalf("result = %+v", res)
 	}
-	if d := openT(t, in).Deviations(); len(d) != 0 {
+	b := openT(t, in)
+	if d := b.Deviations(); len(d) != 0 {
 		t.Errorf("rewrite still deviates: %q", d)
 	}
+	b.Close()
 	if res = optimizeT(t, in, opts); res.Status != "skipped" {
 		t.Errorf("normalized archive should be skipped: %+v", res)
 	}
@@ -740,7 +743,14 @@ func TestReplaceSourceRefusesAnotherFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st, err := os.Stat(path)
+	// (from the open file, as Open stamps it: on Windows os.Stat loads the
+	// file ID lazily, from whatever is at the path when compared)
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := f.Stat()
+	f.Close()
 	if err != nil {
 		t.Fatal(err)
 	}

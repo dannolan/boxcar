@@ -175,7 +175,9 @@ func TestOptimizeInPlaceKeepsFilesWhenRecoveryFails(t *testing.T) {
 	if len(b) != 1 || !bytes.Equal(readOr(t, b[0]), before) || len(partials) != 1 {
 		t.Fatalf("backups %v partials %v", b, partials)
 	}
-	if _, err := Open(ctxT(), partials[0]); err != nil {
+	if b, err := Open(ctxT(), partials[0]); err != nil {
 		t.Errorf("kept optimized copy does not open: %v", err)
+	} else {
+		b.Close()
 	}
 }
