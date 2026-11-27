@@ -24,6 +24,7 @@ type fileRecord struct {
 	stored int64
 	digest [32]byte
 	codec  int
+	window int64 // the zstd frame's decoder window (codec 1)
 }
 
 type dirRecord struct {
@@ -360,6 +361,7 @@ func (a *Archive) parse(ctx context.Context) {
 		at += 80
 
 		binfmt.Require((codec == 0 || codec == 1) && cf == 0 && r == 0 && allZero(r3), "Unknown codec or file flags.")
+		var window int64
 		if size == 0 {
 			// The reference also requires off == 0. KaiDump records the blob
 			// cursor as an empty file's offset; nothing is read from it, so
@@ -391,6 +393,7 @@ func (a *Archive) parse(ctx context.Context) {
 				}
 				binfmt.Require(params.contentSize == sizeI && params.dictID == 0, "Zstandard frame size/dictionary is unsupported.")
 				binfmt.Require(params.windowSize <= MaxWindow, "Zstandard frame requires a decoder window larger than 1 GiB.")
+				window = params.windowSize
 				cursor := offI + int64(params.headerSize)
 				for {
 					binfmt.Check(ctx)
@@ -418,7 +421,7 @@ func (a *Archive) parse(ctx context.Context) {
 				binfmt.Require(cursor == offI+storedI, "NUP extent must contain exactly one Zstandard frame.")
 			}
 		}
-		a.files = append(a.files, fileRecord{name: name(no, nl, false), size: int64(size), off: int64(off), stored: int64(stored), digest: to32(digestBytes), codec: int(codec)})
+		a.files = append(a.files, fileRecord{name: name(no, nl, false), size: int64(size), off: int64(off), stored: int64(stored), digest: to32(digestBytes), codec: int(codec), window: window})
 	}
 
 	sort.Slice(regions, func(i, j int) bool {
@@ -710,7 +713,25 @@ func (a *Archive) Verify(ctx context.Context, progress binfmt.Progress) (stats S
 	next := make(chan int)
 	failAt, failErr := len(a.files), error(nil)
 	var wg sync.WaitGroup
-	workers := min(runtime.GOMAXPROCS(0), max(len(todo), 1))
+	// Each worker keeps a decoder (for the largest window it may meet) and
+	// a read buffer, reserved from the working-memory budget.
+	var window int64
+	for _, i := range todo {
+		if a.files[i].codec == 1 {
+			window = max64(window, a.files[i].window)
+		}
+	}
+	perWorker := int64(Block)
+	if window > 0 {
+		perWorker += decoderCost(window)
+	}
+	workers, _, reserved, rerr := memBudget.reserveFlexible(ctx, 0, perWorker,
+		min(runtime.GOMAXPROCS(0), max(len(todo), 1)), 0, 0)
+	if rerr != nil {
+		binfmt.Check(ctx)
+		return nil, rerr
+	}
+	defer memBudget.release(reserved)
 	for k := 0; k < workers; k++ {
 		wg.Add(1)
 		go func() {

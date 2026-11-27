@@ -86,6 +86,13 @@ func Pack(ctx context.Context, packages []Package, output string, opts PackOptio
 	// already existed belongs to someone else and must not be removed.
 	defer func() { _ = os.Remove(temp) }()
 	defer out.Close()
+	// One encoder at a time and the read buffers, from the working-memory
+	// budget shared with optimizations.
+	if err := memBudget.acquire(ctx, encoderCost(level)+2*Block); err != nil {
+		binfmt.Check(ctx)
+		return res, err
+	}
+	defer memBudget.release(encoderCost(level) + 2*Block)
 
 	if err := writeZeros(out, bloboff); err != nil {
 		return res, err

@@ -746,6 +746,12 @@ func (r *repacking) estimateCompression() {
 	if len(cands) == 0 {
 		return
 	}
+	// One encoder and one read buffer, from the working-memory budget.
+	if err := memBudget.acquire(r.ctx, encoderCost(r.level)+Block); err != nil {
+		binfmt.Check(r.ctx)
+		binfmt.Fail("%v", err)
+	}
+	defer memBudget.release(encoderCost(r.level) + Block)
 	counter := &countWriter{}
 	enc, err := newZstdEncoder(counter, r.level, 0)
 	binfmt.Require(err == nil, "%v", err)
@@ -1001,7 +1007,11 @@ func (r *repacking) write(out outFile, report func(done, total int64)) (stats Re
 	w.out.pos = r.l.bloboff
 	w.stats.UniqueContents = r.plan.UniqueContents
 	w.stats.DuplicateFiles = r.plan.DuplicateFiles
-	par := w.startParallel(parWorkers())
+	par, perr := w.startParallel()
+	if perr != nil {
+		binfmt.Check(r.ctx)
+		return stats, perr
+	}
 	defer par.stop()
 
 	for i := range r.l.files {

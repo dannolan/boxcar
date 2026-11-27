@@ -21,88 +21,52 @@ import (
 // exactly as the streaming path does, so both paths emit identical frames.
 // Larger contents keep the streaming path (bounded by Block-sized buffers).
 //
-// Two process-wide budgets keep concurrent archives (--jobs) and their
-// workers together within the machine: cpuTokens (one per CPU) is held
-// while a worker computes, and memBudget bounds the bytes read and encoded
-// ahead of the writers.
+// Workers share the process-wide CPU tokens (one per CPU, held while a
+// worker computes) and reserve their memory from the working-memory budget
+// (membudget.go): each write reserves its writer's and workers' encoders
+// and decoders and an allowance for the bytes read and encoded ahead of the
+// writer before it starts, adapting the number of workers to what the
+// budget has free.
 var parChunk int64 = 32 << 20 // (a variable so tests can force the streaming path)
 
-var (
-	cpuTokens = &budget{limit: int64(runtime.GOMAXPROCS(0))}
-	memBudget = &budget{limit: 128 << 20}
-)
+var cpuTokens = &budget{limit: int64(runtime.GOMAXPROCS(0))}
 
-// budget is a weighted semaphore. A request larger than the limit is
-// granted when nothing else is held, so no single job can deadlock.
-type budget struct {
-	mu    sync.Mutex
-	limit int64
-	used  int64
-	wake  chan struct{}
+// readAhead is the allowance a write would like for jobs read and encoded
+// ahead of its writer; it gets less (down to its largest job) when the
+// budget is short.
+const readAhead = 128 << 20
+
+// chunkPool keeps a write's job bytes in chunks of one size (Block), so
+// buffers are reusable whatever the file sizes and steady-state encoding
+// allocates and clears almost nothing. It never holds more than the write's
+// job allowance, and goes with the write.
+type chunkPool struct {
+	mu   sync.Mutex
+	list [][]byte
+	max  int
 }
 
-func (b *budget) acquire(ctx context.Context, n int64) error {
-	for {
-		b.mu.Lock()
-		if b.used == 0 || b.used+n <= b.limit {
-			b.used += n
-			b.mu.Unlock()
-			return nil
-		}
-		if b.wake == nil {
-			b.wake = make(chan struct{})
-		}
-		wake := b.wake
-		b.mu.Unlock()
-		select {
-		case <-wake:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
-
-func (b *budget) release(n int64) {
-	b.mu.Lock()
-	b.used -= n
-	if b.wake != nil {
-		close(b.wake)
-		b.wake = nil
-	}
-	b.mu.Unlock()
-}
-
-// Worker jobs keep their bytes in chunks of one size (Block) taken from a
-// free list, so buffers are always reusable whatever the file sizes, the
-// free list never holds more than the memory budget, and steady-state
-// encoding allocates and clears almost nothing.
-var freeChunks struct {
-	sync.Mutex
-	list   [][]byte
-	active int // parallel writes in progress; the list is emptied when none is
-}
-
-func getChunk() []byte {
-	freeChunks.Lock()
-	if n := len(freeChunks.list); n > 0 {
-		b := freeChunks.list[n-1]
-		freeChunks.list[n-1] = nil
-		freeChunks.list = freeChunks.list[:n-1]
-		freeChunks.Unlock()
+func (p *chunkPool) get() []byte {
+	p.mu.Lock()
+	if n := len(p.list); n > 0 {
+		b := p.list[n-1]
+		p.list[n-1] = nil
+		p.list = p.list[:n-1]
+		p.mu.Unlock()
 		return b
 	}
-	freeChunks.Unlock()
+	p.mu.Unlock()
 	return make([]byte, Block)
 }
 
-func putChunks(bufs [][]byte) {
-	freeChunks.Lock()
-	defer freeChunks.Unlock()
+func (p *chunkPool) put(bufs [][]byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	for _, b := range bufs {
-		if int64(len(freeChunks.list)+1)*Block > memBudget.limit {
+		if len(p.list) >= p.max {
 			return
 		}
-		freeChunks.list = append(freeChunks.list, b[:Block])
+		p.list = append(p.list, b[:Block])
 	}
 }
 
@@ -111,6 +75,7 @@ func chunksFor(n int64) int64 { return (n + Block - 1) / Block }
 // chunked is a byte sequence kept in Block-sized chunks; writes past limit
 // fail with errFrameTooLarge.
 type chunked struct {
+	pool  *chunkPool
 	bufs  [][]byte
 	n     int64
 	limit int64
@@ -124,7 +89,7 @@ func (c *chunked) Write(p []byte) (int, error) {
 	for done < len(p) {
 		at := int(c.n % Block)
 		if at == 0 {
-			c.bufs = append(c.bufs, getChunk())
+			c.bufs = append(c.bufs, c.pool.get())
 		}
 		k := copy(c.bufs[len(c.bufs)-1][at:], p[done:])
 		done += k
@@ -153,7 +118,7 @@ func (c *chunked) reader() io.Reader {
 }
 
 func (c *chunked) free() {
-	putChunks(c.bufs)
+	c.pool.put(c.bufs)
 	c.bufs, c.n = nil, 0
 }
 
@@ -172,14 +137,17 @@ type parJob struct {
 // parallel runs the workers for one write. jobs holds, per node, the job
 // that stores it (nil: the writer stores it itself).
 type parallel struct {
-	w       *repackWriter
-	ctx     context.Context
-	cancel  context.CancelFunc
-	jobs    map[int]*parJob
-	order   []*parJob
-	queue   chan *parJob
-	wg      sync.WaitGroup
-	started bool
+	w        *repackWriter
+	ctx      context.Context
+	cancel   context.CancelFunc
+	jobs     map[int]*parJob
+	order    []*parJob
+	queue    chan *parJob
+	wg       sync.WaitGroup
+	pool     *chunkPool
+	ahead    *budget // the job allowance, out of reserved
+	reserved int64   // held in memBudget until stop
+	workers  int
 }
 
 // parallelEligible reports whether node i is stored by a worker.
@@ -192,86 +160,100 @@ func (w *repackWriter) parallelEligible(i int) bool {
 	return rec.size <= parChunk && rec.stored <= parChunk
 }
 
-func (w *repackWriter) startParallel(workers int) *parallel {
-	ctx, cancel := context.WithCancel(w.ctx)
-	p := &parallel{w: w, ctx: ctx, cancel: cancel, jobs: map[int]*parJob{}, queue: make(chan *parJob)}
-	for i := range w.nodes {
-		if w.parallelEligible(i) {
-			rec := w.a.files[w.nodes[i].rec]
-			// the stored bytes and the new frame (at most the file's size)
-			cost := (chunksFor(rec.stored) + chunksFor(rec.size)) * Block
-			if rec.codec == 1 {
-				cost += chunksFor(rec.size) * Block // the decoded bytes
-			}
-			j := &parJob{node: i, cost: cost, done: make(chan struct{})}
-			p.jobs[i] = j
-			p.order = append(p.order, j)
+// jobCost is the memory a worker job holds until its bytes are written:
+// the stored bytes, the decoded bytes, the new frame (at most the file's
+// size) and, for a frame whose window is larger than a worker decoder
+// keeps, a decoder of its own.
+func jobCost(rec fileRecord) int64 {
+	cost := (chunksFor(rec.stored) + chunksFor(rec.size)) * Block
+	if rec.codec == 1 {
+		cost += chunksFor(rec.size) * Block
+		if rec.window > workerWindow {
+			cost += decoderCost(rec.window)
 		}
 	}
-	if len(p.order) == 0 {
-		cancel()
-		return p
+	return cost
+}
+
+// startParallel reserves the write's memory and starts its workers. It
+// waits while the budget cannot give even the minimum: the writer, one
+// worker and the largest job.
+func (w *repackWriter) startParallel() (*parallel, error) {
+	ctx, cancel := context.WithCancel(w.ctx)
+	p := &parallel{w: w, ctx: ctx, cancel: cancel, jobs: map[int]*parJob{}, queue: make(chan *parJob)}
+	var maxJob, window int64
+	decodes := false
+	for i := range w.nodes {
+		rec := w.a.files[w.nodes[i].rec]
+		if !w.parallelEligible(i) {
+			if rec.codec == 1 {
+				window = max64(window, rec.window)
+			}
+			continue
+		}
+		j := &parJob{node: i, cost: jobCost(rec), done: make(chan struct{})}
+		p.jobs[i] = j
+		p.order = append(p.order, j)
+		maxJob = max64(maxJob, j.cost)
+		decodes = decodes || rec.codec == 1
 	}
-	freeChunks.Lock()
-	freeChunks.active++
-	freeChunks.Unlock()
-	p.started = true
-	for k := 0; k < workers; k++ {
+	// The writer streams the other contents: an encoder, a decoder for the
+	// largest window among them, its read buffer.
+	writer := encoderCost(w.level) + Block
+	if window > 0 {
+		writer += decoderCost(window)
+	}
+	perWorker, want := int64(0), 0
+	if len(p.order) > 0 {
+		perWorker, want = encoderCost(w.level), parWorkers()
+		if decodes {
+			perWorker += decoderCost(workerWindow)
+		}
+	}
+	units, ahead, total, err := memBudget.reserveFlexible(w.ctx, writer, perWorker, want, maxJob, max64(readAhead, maxJob))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	p.reserved = total
+	if len(p.order) == 0 {
+		return p, nil
+	}
+	p.workers = units
+	p.ahead = &budget{limit: ahead}
+	p.pool = &chunkPool{max: int(ahead / Block)}
+	for k := 0; k < p.workers; k++ {
 		p.wg.Add(1)
 		go p.worker()
 	}
-	// The feeder claims memory in layout order, so the writer's next job
-	// always holds its share before any later one.
+	// The feeder claims job memory in layout order, so the writer's next job
+	// always holds its share before any later one. The allowance holds at
+	// least the largest job, so it never waits for memory another archive
+	// holds.
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
 		defer close(p.queue)
 		for _, j := range p.order {
-			if memBudget.acquire(ctx, j.cost) != nil {
+			if p.ahead.acquire(ctx, j.cost) != nil {
 				return
 			}
 			select {
 			case p.queue <- j:
 			case <-ctx.Done():
-				memBudget.release(j.cost)
+				p.ahead.release(j.cost)
 				return
 			}
 		}
 	}()
-	return p
-}
-
-// Encoders are shared by every archive in the process: a worker takes one
-// per job while it holds a CPU token, so at most one encoder per CPU and
-// level is ever built (each holds window-sized history buffers).
-var freeEncoders struct {
-	sync.Mutex
-	byLevel map[int][]*zstd.Encoder
-}
-
-func getEncoder(level int) (*zstd.Encoder, error) {
-	freeEncoders.Lock()
-	if l := freeEncoders.byLevel[level]; len(l) > 0 {
-		e := l[len(l)-1]
-		freeEncoders.byLevel[level] = l[:len(l)-1]
-		freeEncoders.Unlock()
-		return e, nil
-	}
-	freeEncoders.Unlock()
-	return newZstdEncoder(io.Discard, level, 0)
-}
-
-func putEncoder(level int, e *zstd.Encoder) {
-	freeEncoders.Lock()
-	defer freeEncoders.Unlock()
-	if freeEncoders.byLevel == nil {
-		freeEncoders.byLevel = map[int][]*zstd.Encoder{}
-	}
-	freeEncoders.byLevel[level] = append(freeEncoders.byLevel[level], e)
+	return p, nil
 }
 
 func (p *parallel) worker() {
 	defer p.wg.Done()
+	// The worker's encoder and decoder are its own for the write (their
+	// memory is part of the write's reservation) and go with it.
+	var enc *zstd.Encoder
 	var dec *zstd.Decoder
 	defer func() {
 		if dec != nil {
@@ -281,12 +263,13 @@ func (p *parallel) worker() {
 	for j := range p.queue {
 		if cerr := cpuTokens.acquire(p.ctx, 1); cerr != nil {
 			j.err = cerr
-		} else if enc, eerr := getEncoder(p.w.level); eerr != nil {
-			j.err = eerr
-			cpuTokens.release(1)
 		} else {
-			j.err = p.encodeJob(j, enc, &dec)
-			putEncoder(p.w.level, enc)
+			if enc == nil {
+				enc, j.err = newZstdEncoder(io.Discard, p.w.level, 0)
+			}
+			if j.err == nil {
+				j.err = p.encodeJob(j, enc, &dec)
+			}
 			cpuTokens.release(1)
 		}
 		close(j.done)
@@ -301,11 +284,11 @@ func (p *parallel) encodeJob(j *parJob, enc *zstd.Encoder, dec **zstd.Decoder) (
 	w := p.w
 	np := w.nodes[j.node]
 	rec := w.a.files[np.rec]
-	stored := &chunked{limit: rec.stored}
+	stored := &chunked{pool: p.pool, limit: rec.stored}
 	j.held = append(j.held, stored)
 	for off := int64(0); off < rec.stored; {
 		k := min64(Block, rec.stored-off)
-		c := getChunk()
+		c := p.pool.get()
 		stored.bufs = append(stored.bufs, c)
 		if _, err := w.a.f.ReadAt(c[:k], rec.off+off); err != nil {
 			binfmt.Fail("%v", err)
@@ -315,21 +298,37 @@ func (p *parallel) encodeJob(j *parJob, enc *zstd.Encoder, dec **zstd.Decoder) (
 	}
 	raw := stored
 	if rec.codec == 1 {
-		if *dec == nil {
-			d, err := zstd.NewReader(nil, zstd.WithDecoderMaxWindow(MaxWindow), zstd.WithDecoderConcurrency(1))
+		// A frame with a larger window than the worker's decoder keeps gets
+		// a decoder of its own (reserved in the job's cost), closed after.
+		d := dec
+		var own *zstd.Decoder
+		if rec.window > workerWindow {
+			d = &own
+			defer func() {
+				if own != nil {
+					own.Close()
+				}
+			}()
+		}
+		if *d == nil {
+			max := uint64(workerWindow)
+			if rec.window > workerWindow {
+				max = MaxWindow
+			}
+			nd, err := zstd.NewReader(nil, zstd.WithDecoderMaxWindow(max), zstd.WithDecoderConcurrency(1))
 			if err != nil {
 				binfmt.Fail("%v", err)
 			}
-			*dec = d
+			*d = nd
 		}
-		if err := (*dec).Reset(stored.reader()); err != nil {
-			(*dec).Close()
-			*dec = nil
+		if err := (*d).Reset(stored.reader()); err != nil {
+			(*d).Close()
+			*d = nil
 			binfmt.Fail("%v", err)
 		}
-		raw = &chunked{limit: rec.size}
+		raw = &chunked{pool: p.pool, limit: rec.size}
 		j.held = append(j.held, raw)
-		if _, err := io.Copy(raw, *dec); errors.Is(err, errFrameTooLarge) {
+		if _, err := io.Copy(raw, *d); errors.Is(err, errFrameTooLarge) {
 			binfmt.Fail("Decompressed file exceeds its declared size.")
 		} else if err != nil {
 			binfmt.Fail("%v", err)
@@ -345,7 +344,7 @@ func (p *parallel) encodeJob(j *parJob, enc *zstd.Encoder, dec **zstd.Decoder) (
 	if np.act == actReencode && np.oldOK {
 		limit = min64(limit, rec.stored-1)
 	}
-	frame := &chunked{limit: max64(limit, 0)}
+	frame := &chunked{pool: p.pool, limit: max64(limit, 0)}
 	j.held = append(j.held, frame)
 	enc.ResetContentSize(frame, rec.size)
 	werr := raw.each(func(b []byte) error { _, err := enc.Write(b); return err })
@@ -399,38 +398,18 @@ func (p *parallel) written(j *parJob) {
 		c.free()
 	}
 	j.held = nil
-	memBudget.release(j.cost)
+	p.ahead.release(j.cost)
 	j.cost = 0
 }
 
-// stop ends the workers and returns the memory of jobs that were claimed
-// but never written (errors, cancellation).
+// stop ends the workers and returns the write's reservation, also after
+// errors and cancellation (the job allowance goes with it).
 func (p *parallel) stop() {
 	p.cancel()
 	p.wg.Wait()
-	defer func() {
-		if !p.started {
-			return
-		}
-		freeChunks.Lock()
-		if freeChunks.active--; freeChunks.active == 0 {
-			freeChunks.list = nil // idle memory goes back to the runtime between archives
-			freeEncoders.Lock()
-			freeEncoders.byLevel = nil
-			freeEncoders.Unlock()
-		}
-		freeChunks.Unlock()
-	}()
-	for _, j := range p.order {
-		select {
-		case <-j.done: // (done means the feeder claimed its memory)
-			if j.cost > 0 {
-				memBudget.release(j.cost)
-				j.cost = 0
-			}
-		default:
-		}
-	}
+	p.pool = nil
+	memBudget.release(p.reserved)
+	p.reserved = 0
 }
 
 // parWorkers is the number of encoding workers per archive: one per CPU
