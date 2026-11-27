@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -412,13 +413,22 @@ func sameDir(a, b string) bool {
 	return err1 == nil && err2 == nil && os.SameFile(sa, sb)
 }
 
-// autoJobs picks how many archives run at once when --jobs is 0: one.
-// Each archive already compresses and verifies its files on every CPU
-// (shared, process-wide CPU and memory budgets), and a second concurrent
-// archive measured only ~10% faster on two real archives (14.8 s -> 13.3 s)
-// for ~23% more peak memory; see docs/OPTIMIZE.md "Concurrency".
-func autoJobs([]optimizeTarget, OptimizeOptions) int {
-	return 1
+// autoJobs picks how many archives run at once when --jobs is 0: up to
+// four, and at most half the CPUs. Each archive already compresses and
+// verifies its files on every CPU under process-wide CPU and memory
+// budgets, but its planning, writer and commit run on one goroutine, so
+// small archives leave most CPUs idle. Measured (8 CPUs): four 125 MB
+// archives 2.3 s -> 1.4 s (2 jobs) -> 1.0 s (4 jobs) with no more peak
+// memory; two real archives (2.9 + 6.7 GB) 14.8 s -> 13.3 s (2 jobs) for
+// ~23% more peak memory. See docs/OPTIMIZE.md "Concurrency".
+func autoJobs(targets []optimizeTarget, _ OptimizeOptions) int {
+	valid := 0
+	for _, t := range targets {
+		if t.err == nil {
+			valid++
+		}
+	}
+	return max(1, min(valid, 4, runtime.NumCPU()/2))
 }
 
 // assignOutputs maps each target to its output path.
