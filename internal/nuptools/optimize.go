@@ -352,9 +352,12 @@ func assignOutputs(targets []optimizeTarget, opts OptimizeOptions) error {
 	claimed := map[string]bool{}
 	for i := range targets {
 		t := &targets[i]
+		if t.err != nil {
+			continue
+		}
 		t.output = filepath.Join(out, t.rel)
 		key := strings.ToLower(t.output)
-		if claimed[key] && t.err == nil {
+		if claimed[key] {
 			t.err = fmt.Errorf("Another archive is already written to %s.", t.output)
 		}
 		claimed[key] = true

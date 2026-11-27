@@ -268,6 +268,32 @@ func TestOptimizeBatchSkipsOwnOutputFolder(t *testing.T) {
 	}
 }
 
+// TestOptimizeBatchFailedTargetReservesNothing: a missing input must not
+// block a valid one that maps to the same output name.
+func TestOptimizeBatchFailedTargetReservesNothing(t *testing.T) {
+	lib := library(t)
+	valid := filepath.Join(t.TempDir(), "valid")
+	if err := os.MkdirAll(valid, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(lib, "a.nup"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(valid, "game.nup"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opts := batchOptions()
+	opts.Output = filepath.Join(t.TempDir(), "out")
+	res, err := Optimize(context.Background(), []string{filepath.Join(lib, "missing", "game.nup"), filepath.Join(valid, "game.nup")}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Archives[0].Status != "failed" || res.Archives[1].Status != "optimized" {
+		t.Fatalf("results = %+v", res.Archives)
+	}
+}
+
 func TestOptimizeBatchArguments(t *testing.T) {
 	lib := library(t)
 	empty := t.TempDir()

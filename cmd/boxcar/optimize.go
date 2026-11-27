@@ -64,7 +64,7 @@ func runOptimize(args []string) int {
 	minGain := fs.Float64("min-gain", 1, "skip archives whose estimated savings are below this percent")
 	force := fs.Bool("force", false, "rewrite archives even when they look already optimized")
 	latest := fs.Bool("latest-snapshot", false, "merge base and updates into one runnable game (changes content; opt-in)")
-	fs.Bool("no-latest-snapshot", false, "keep every package (default)")
+	noLatest := fs.Bool("no-latest-snapshot", false, "keep every package (default)")
 	resultJSON := fs.String("result-json", "", "also write the JSON result to this new file")
 
 	rest := args
@@ -121,7 +121,7 @@ func runOptimize(args []string) int {
 		DryRun:         *dryRun,
 		Force:          *force,
 		MinGain:        *minGain,
-		LatestSnapshot: *latest,
+		LatestSnapshot: *latest && !*noLatest,
 		Progress:       printer.progress,
 		Finished:       printer.finished,
 	}

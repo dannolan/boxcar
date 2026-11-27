@@ -182,6 +182,39 @@ func TestOptimizeCommandErrors(t *testing.T) {
 	}
 }
 
+// TestOptimizeNoLatestSnapshotWins: --no-latest-snapshot overrides an
+// earlier --latest-snapshot, as it does for pack.
+func TestOptimizeNoLatestSnapshotWins(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "bundle.nup")
+	files := func(main string) map[string]*nup.Source {
+		return map[string]*nup.Source{
+			"exefs/main.npdm": nup.SourceData(buildNPDM(cliTID)),
+			"exefs/main":      nup.SourceData([]byte(main)),
+			"romfs/a.bin":     nup.SourceData(bytes.Repeat([]byte(main), 100)),
+		}
+	}
+	pkgs := []nup.Package{
+		{TitleID: cliTID, Kind: 0, Files: files("base")},
+		{TitleID: cliTID | 0x800, Version: 65536, Kind: 1, Files: files("update")},
+	}
+	if _, err := nup.Pack(context.Background(), pkgs, in, nup.PackOptions{Level: 1, LargeRaw: true}); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.nup")
+	if code := run([]string{"optimize", in, "--output", out, "--latest-snapshot", "--no-latest-snapshot", "--force"}); code != 0 {
+		t.Fatalf("optimize = %d", code)
+	}
+	a, err := nup.Open(context.Background(), out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if n := len(a.Packages()); n != 2 {
+		t.Errorf("packages = %d, want 2 (no consolidation)", n)
+	}
+}
+
 func TestNupOperationParsing(t *testing.T) {
 	for want, args := range map[string][]string{
 		"optimize": {"--input", "x", "--nup-operation", "optimize"},
