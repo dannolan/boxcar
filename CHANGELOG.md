@@ -26,6 +26,18 @@
   exclusive rename; policy violations in duplicate extents are rewritten;
   rewrites match Pack's alignment byte for byte; `--no-latest-snapshot`
   overrides `--latest-snapshot`.
+- **Optimizer publication and in-place safety (merge-blocking fixes).**
+  The placeholder-file fallback for filesystems without hard links is gone:
+  new archives are published with a hard link or an exclusive rename, and
+  where neither exists the run fails with nothing published. In-place runs
+  refuse to proceed unlocked; Windows gets a real lock (no-share,
+  delete-on-close sidecar) and `ReplaceFileW`, which keeps ACLs and
+  attributes. On macOS/Linux the replacement keeps the original's mode,
+  owner and extended attributes (ACLs), and a failure to carry them over
+  keeps the original instead of being ignored. Concurrent jobs share one
+  free-space reservation per drive. `Pack` registers its temp-file cleanup
+  only after the exclusive create succeeded and also publishes through the
+  exclusive commit (works on exFAT/FAT32).
 - **Faster NUP verification and extraction.** Read buffers and zstd
   decoders are reused across files, and alignment padding no longer
   allocates 1 MiB per extent; on a 67,000-file archive, verification went

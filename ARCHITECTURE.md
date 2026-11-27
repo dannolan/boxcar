@@ -191,14 +191,17 @@ every push with a pinned reference checkout.
   `REPLACE_EXISTING` on Windows (`commit_*.go`, `platform_*.go`). Never plain
   `os.Rename` on Windows for a commit — Go's version replaces. The one
   sanctioned replacement is `nup.Optimize` in in-place mode: only after the
-  temp file is verified and the source's size/mtime are re-checked, through
-  `replaceFile` (POSIX `rename`; Windows `MoveFileEx` with
-  `REPLACE_EXISTING|WRITE_THROUGH`), under an advisory `flock` on POSIX and
-  after checking the path still holds the opened file (`os.SameFile`). For
-  new outputs `nup.Optimize` uses `commitNew`: a hard link as in
-  `commitFile`, else (exFAT/FAT32) an exclusive rename (`renameat2`
-  `RENAME_NOREPLACE` on Linux, `renamex_np` `RENAME_EXCL` on macOS), else
-  an `O_EXCL` claim replaced by `rename` only while it is still the claim.
+  temp file is verified and the source's identity, size and mtime are
+  re-checked, through `replaceFile` (POSIX `rename`; Windows `ReplaceFileW`,
+  which keeps ACLs/attributes/streams), after `prepareReplacement` copied
+  mode, owner and xattrs (POSIX; failure keeps the original), under a lock
+  that must succeed (`flock` on POSIX, a no-share delete-on-close sidecar
+  on Windows). New outputs (`nup.Optimize`, `nup.Pack`) use `commitNew`: a
+  hard link, else (exFAT/FAT32) an exclusive rename (`renameat2`
+  `RENAME_NOREPLACE` on Linux, `renamex_np` `RENAME_EXCL` on macOS), else a
+  clean failure (`errNoExclusivePublish`) — never a placeholder file.
+  Worst-case temp space is claimed through `diskfree.Reserve`, shared by
+  concurrent jobs per volume.
 - **Links refused**: symlinks everywhere; reparse points on Windows
   (`patch_windows.go`/`platform_windows.go`). Error text mirrors Python.
 - **No mmap**: all random access goes through `internal/region`.

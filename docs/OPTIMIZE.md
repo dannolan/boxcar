@@ -92,28 +92,48 @@ under `plan.deviations` (`notes` for verify/inspect).
 - The source is checked as it is read, including duplicate copies that
   deduplication drops. A damaged source fails the run instead of being
   silently repaired.
-- `--output` never overwrites an existing file: the verified file is
+- `--output` never overwrites an existing file and never shows an empty
+  or partial archive under the final name: the complete, flushed file is
   published with a hard link, or on filesystems without hard links (exFAT
-  and FAT32 SD cards) with an exclusive rename. Only where neither exists
-  is the name reserved with an empty file for the instant before the
-  rename.
+  and FAT32 SD cards) with an exclusive rename (`renameat2
+  RENAME_NOREPLACE` on Linux, `renamex_np RENAME_EXCL` on macOS,
+  `MoveFileEx` without replace on Windows). Where neither exists (some
+  FUSE drivers, for example) the run fails with nothing published; write
+  to another drive and copy the file over.
 - `--in-place` replaces the original only after verification, and only if
   the path still holds the very file that was read (same file identity,
-  size and modification time), with a single atomic rename (POSIX
-  `rename`, Windows `MoveFileEx`). On macOS and Linux an advisory lock
-  stops a second optimization of the same archive, and the partial copy is
-  created with the original's permission bits, which the replacement
-  keeps. On Windows the replacement gets the folder's default permissions;
-  explicit access lists on the original are not copied. If the rewrite is
-  not smaller, the original is kept unless a policy fix, a spec deviation,
+  size and modification time, checked again right before the swap). The
+  swap is one atomic rename on macOS and Linux and `ReplaceFileW` on
+  Windows. Concurrent Boxcar runs on the same archive are excluded with a
+  lock: `flock` on the archive (macOS/Linux) or a hidden
+  `<name>.nup.boxcar-lock` file opened without sharing and deleted on close
+  (Windows). If the lock cannot be taken because the filesystem does not
+  support it, the in-place run is refused instead of running unlocked.
+- Security metadata is kept: on macOS and Linux the replacement gets the
+  original's permission bits (including setuid/setgid/sticky), owner and
+  group, and extended attributes (POSIX ACLs, SELinux labels, macOS
+  metadata); the partial copy is created with the original's permission
+  bits so it is never readable by more users meanwhile. On Windows
+  `ReplaceFileW` keeps the original's ACLs, attributes, creation time and
+  alternate streams. Anything that cannot be carried over fails the run and
+  keeps the original, unless the replacement already has it (exFAT and
+  FAT32 have one owner and mode per volume). If the rewrite is not smaller,
+  the original is kept unless a policy fix, a spec deviation,
   `--latest-snapshot` or `--force` requires the rewrite.
-- These checks guard against other Boxcar runs and against a file that
-  changed or was replaced while it was being optimized. They are not
-  atomic against another program writing to the same path at the same
-  instant: the empty-file reservation above, and the identity check right
-  before an in-place rename, each leave a brief window. The advisory lock
-  is skipped on filesystems that refuse it (some network mounts). Do not
-  point two different tools at the same archive at once.
+- Free space is checked for the worst-case output size, and concurrent
+  jobs (`--jobs`) on one drive share that check: each job's reservation
+  counts only what its partial file may still grow by.
+- Limits: the lock coordinates Boxcar runs, not other programs. A program
+  that ignores it and rewrites or replaces the archive in the instant
+  between Boxcar's final identity check and the swap is not detected; do
+  not point two different tools at the same archive at once. Durability
+  after a power loss depends on the filesystem honouring `fsync` (the new
+  archive is flushed before it is published, and the folder after);
+  removable media with write caches may still lose the last change, but
+  never expose a partial archive under the final name on a journaling or
+  copy-on-write filesystem. On FAT32/exFAT, which have no journal, a power
+  loss during the rename itself can leave the folder needing a disk check;
+  the original's data is not overwritten in place either way.
 - Errors and Ctrl-C remove the partial file and leave the original as it
   was. A second Ctrl-C exits immediately. After a hard kill or power loss the
   original is still intact; a stray `*.partial` file may remain and can be

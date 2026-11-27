@@ -8,33 +8,57 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
-func TestClaimAndRenameNeverOverwrites(t *testing.T) {
+// TestCommitNewWithoutLinks: on a filesystem without hard links the output
+// is published with an exclusive rename, and where that is missing too the
+// commit fails without creating, replacing or emptying output.
+func TestCommitNewWithoutLinks(t *testing.T) {
 	dir := t.TempDir()
 	temp := filepath.Join(dir, "out.nup.partial")
 	out := filepath.Join(dir, "out.nup")
-	if err := os.WriteFile(temp, []byte("new"), 0o644); err != nil {
-		t.Fatal(err)
+	write := func(p, s string) {
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.WriteFile(out, []byte("existing"), 0o644); err != nil {
-		t.Fatal(err)
+	noLink := func(string, string) error { return &os.LinkError{Op: "link", Err: syscall.EPERM} }
+	defer func(l func(string, string) error, r func(string, string) error) { linkFile, exclusiveRename = l, r }(linkFile, exclusiveRename)
+	linkFile = noLink
+	exclusiveRename = func(string, string) error { return errors.ErrUnsupported }
+
+	write(temp, "new")
+	if err := commitNew(temp, out); !errors.Is(err, errNoExclusivePublish) {
+		t.Fatalf("no exclusive publication: err = %v", err)
 	}
-	if err := claimAndRename(temp, out); !errors.Is(err, fs.ErrExist) {
+	if pathExists(out) {
+		t.Fatal("output appeared although publication was impossible")
+	}
+	write(out, "existing")
+	if err := commitNew(temp, out); err == nil {
+		t.Fatal("commit succeeded")
+	}
+	if got, _ := os.ReadFile(out); string(got) != "existing" {
+		t.Fatalf("existing output became %q", got)
+	}
+
+	exclusiveRename = renameNoReplace
+	if err := commitNew(temp, out); errors.Is(err, errNoExclusivePublish) {
+		t.Skip("no exclusive rename on this system")
+	} else if !errors.Is(err, fs.ErrExist) {
 		t.Fatalf("existing output: err = %v", err)
 	}
 	if got, _ := os.ReadFile(out); string(got) != "existing" {
-		t.Errorf("existing output was replaced")
+		t.Fatalf("existing output became %q", got)
 	}
-	if err := os.Remove(out); err != nil {
+	os.Remove(out)
+	if err := commitNew(temp, out); err != nil {
 		t.Fatal(err)
 	}
-	if err := claimAndRename(temp, out); err != nil {
-		t.Fatalf("claimAndRename: %v", err)
-	}
 	if got, _ := os.ReadFile(out); string(got) != "new" || pathExists(temp) {
-		t.Errorf("output %q, temp left: %v", got, pathExists(temp))
+		t.Fatalf("output %q, temp left: %v", got, pathExists(temp))
 	}
 }
 
@@ -144,6 +168,18 @@ func TestOptimizeOnFilesystemWithoutHardLinks(t *testing.T) {
 	}
 	opts := defaultOptions()
 	opts.Output = filepath.Join(dir, "out.nup")
+	if _, err := Optimize(t.Context(), in, opts); errors.Is(err, errNoExclusivePublish) {
+		// (fusefat, for one: no RENAME_NOREPLACE) Publication must then
+		// fail cleanly, leaving neither output nor partial file.
+		if pathExists(opts.Output) {
+			t.Fatal("output exists after a refused publication")
+		}
+		assertNoPartials(t, dir)
+		t.Skip("no exclusive rename on BOXCAR_NOLINK_DIR; refused safely")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(opts.Output)
 	if res := optimizeT(t, in, opts); res.Status != "optimized" {
 		t.Fatalf("result = %+v", res)
 	}

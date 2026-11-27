@@ -290,13 +290,12 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 			return res, err
 		}
 	}
-	free, ferr := diskfree.Available(filepath.Dir(final))
+	temp := final + "." + randomHex() + ".partial"
+	release, ferr := diskfree.Reserve(filepath.Dir(final), temp, r.plan.WorstCaseSize)
 	if ferr != nil {
 		return res, ferr
 	}
-	binfmt.Require(free >= uint64(r.plan.WorstCaseSize)+32*1024*1024, "Not enough free space for the worst-case NUP size.")
-
-	temp := final + "." + randomHex() + ".partial"
+	defer release()
 	out, cerr := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
 	if cerr != nil {
 		return res, cerr
@@ -389,7 +388,14 @@ func replaceSource(path, temp string, stamp archiveStamp) error {
 		st.Size() != stamp.size || st.ModTime().UnixNano() != stamp.mtime {
 		return errors.New("NUP changed while it was being optimized; the original was kept.")
 	}
-	return replaceFile(temp, path, st.Mode().Perm())
+	if err := prepareReplacement(temp, path, st); err != nil {
+		return err
+	}
+	if st2, err := os.Lstat(path); err != nil || !os.SameFile(st2, st) ||
+		st2.Size() != stamp.size || st2.ModTime().UnixNano() != stamp.mtime {
+		return errors.New("NUP changed while it was being optimized; the original was kept.")
+	}
+	return replaceFile(temp, path)
 }
 
 func sameFile(a, b string) bool {
