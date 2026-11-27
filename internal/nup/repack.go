@@ -897,6 +897,8 @@ func (r *repacking) write(out *os.File, report func(done, total int64)) (stats R
 	w.out.pos = r.l.bloboff
 	w.stats.UniqueContents = r.plan.UniqueContents
 	w.stats.DuplicateFiles = r.plan.DuplicateFiles
+	par := w.startParallel(parWorkers())
+	defer par.stop()
 
 	for i := range r.l.files {
 		binfmt.Check(r.ctx)
@@ -925,7 +927,14 @@ func (r *repacking) write(out *os.File, report func(done, total int64)) (stats R
 			w.must(writeZeros(out, start-w.out.pos))
 			w.out.pos = start
 			f.off = start
-			f.stored, f.codec = w.store(np, rec)
+			if j := par.take(i); j != nil {
+				w.must(j.data.each(func(b []byte) error { _, err := w.out.Write(b); return err }))
+				f.stored, f.codec = j.data.n, j.codec
+				*j.stat++
+				par.written(j)
+			} else {
+				f.stored, f.codec = w.store(np, rec)
+			}
 		}
 		w.done += rec.size
 		w.progress(w.done)

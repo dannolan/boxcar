@@ -374,9 +374,12 @@ func sameDir(a, b string) bool {
 	return err1 == nil && err2 == nil && os.SameFile(sa, sb)
 }
 
-// autoJobs picks how many archives run at once when --jobs is 0. See
-// docs/OPTIMIZE.md "Concurrency" for the measurements behind it.
-func autoJobs(targets []optimizeTarget, opts OptimizeOptions) int {
+// autoJobs picks how many archives run at once when --jobs is 0: one.
+// Each archive already compresses and verifies its files on every CPU
+// (shared, process-wide CPU and memory budgets), and a second concurrent
+// archive measured only ~10% faster on two real archives (14.8 s -> 13.3 s)
+// for ~23% more peak memory; see docs/OPTIMIZE.md "Concurrency".
+func autoJobs([]optimizeTarget, OptimizeOptions) int {
 	return 1
 }
 

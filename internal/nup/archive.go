@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dannolan/boxcar/internal/binfmt"
 	"github.com/klauspost/compress/zstd"
@@ -559,16 +561,12 @@ func (s *streamer) Close() {
 }
 
 // streamFile decompresses file index, hashes it, and streams it to w (nil
-// discards), invoking perChunk after each output chunk. It reads the extent
-// through a fresh handle, as openFile does.
+// discards), invoking perChunk after each output chunk. It reads through the
+// archive's own handle with positioned reads (safe from several goroutines);
+// a file replaced meanwhile is caught by unchanged().
 func (a *Archive) streamFile(ctx context.Context, s *streamer, index int, w io.Writer, perChunk func(n int)) error {
 	rec := a.files[index]
-	f, err := os.Open(a.path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	var src io.Reader = io.NewSectionReader(f, rec.off, rec.stored)
+	var src io.Reader = io.NewSectionReader(a.f, rec.off, rec.stored)
 	if rec.codec == 1 {
 		if s.dec == nil {
 			dec, err := zstd.NewReader(nil,
@@ -636,34 +634,78 @@ func (a *Archive) FileChunks(ctx context.Context, index int, w io.Writer) (err e
 func (a *Archive) Verify(ctx context.Context, progress binfmt.Progress) (stats Stats, err error) {
 	defer binfmt.Recover(&err)
 	total := a.stats["uncompressed"].(int64)
-	var done int64
+	// Each distinct extent is checked once; files sharing it count as done.
+	var todo []int
 	verified := map[verifyKey]bool{}
-	s := &streamer{}
-	defer s.Close()
-	for i := range a.files {
-		binfmt.Check(ctx)
-		f := a.files[i]
+	var done int64
+	for i, f := range a.files {
 		key := verifyKey{size: f.size, off: f.off, stored: f.stored, digest: f.digest, codec: f.codec}
-		report := func() {
-			if progress != nil {
-				progress("Verifying NUP files", 100*float64(done)/float64(max64(total, 1)))
-			}
-		}
 		if verified[key] {
 			done += f.size
-		} else {
-			if err := a.streamFile(ctx, s, i, nil, func(n int) {
-				done += int64(n)
-				if progress != nil {
-					progress("Verifying NUP files", 100*float64(done)/float64(max64(total, 1)))
-				}
-			}); err != nil {
-				return nil, err
-			}
-			verified[key] = true
+			continue
 		}
-		report()
+		verified[key] = true
+		todo = append(todo, i)
 	}
+	// Extents are hashed by up to one worker per CPU, sharing the process-
+	// wide CPU tokens with the optimizer. Of the failures found before the
+	// others stop, the one earliest in file order is reported.
+	var mu sync.Mutex
+	report := func(n int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		done += n
+		if progress != nil {
+			progress("Verifying NUP files", 100*float64(done)/float64(max64(total, 1)))
+		}
+	}
+	vctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	next := make(chan int)
+	failAt, failErr := len(a.files), error(nil)
+	var wg sync.WaitGroup
+	workers := min(runtime.GOMAXPROCS(0), max(len(todo), 1))
+	for k := 0; k < workers; k++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := &streamer{}
+			defer s.Close()
+			for i := range next {
+				err := cpuTokens.acquire(vctx, 1)
+				if err == nil {
+					err = func() (err error) {
+						defer binfmt.Recover(&err)
+						return a.streamFile(vctx, s, i, nil, func(n int) { report(int64(n)) })
+					}()
+					cpuTokens.release(1)
+				}
+				if err != nil {
+					mu.Lock()
+					if i < failAt && !(errors.Is(err, context.Canceled) && ctx.Err() == nil) {
+						failAt, failErr = i, err
+					}
+					mu.Unlock()
+					cancel()
+				}
+			}
+		}()
+	}
+feed:
+	for _, i := range todo {
+		select {
+		case next <- i:
+		case <-vctx.Done():
+			break feed
+		}
+	}
+	close(next)
+	wg.Wait()
+	binfmt.Check(ctx)
+	if failErr != nil {
+		return nil, failErr
+	}
+	report(0)
 	if err := a.unchanged(); err != nil {
 		return nil, err
 	}

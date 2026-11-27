@@ -2,6 +2,8 @@ package nup
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -182,5 +184,94 @@ func TestOptimizeMeasureReplacesUncertainSkip(t *testing.T) {
 	res = optimizeT(t, in, opts)
 	if res.Status != "optimized" || !res.Verified || res.SavedBytes <= 0 {
 		t.Fatalf("measured run = %+v", res)
+	}
+}
+
+// TestOptimizeParallelDeterministic: the output is byte-identical whatever
+// the number of workers, and identical to the streaming (writer-only) path.
+func TestOptimizeParallelDeterministic(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.nup")
+	r := rand.New(rand.NewSource(3))
+	var files []nuptest.File
+	for i := 0; i < 120; i++ {
+		var data []byte
+		switch i % 4 {
+		case 0: // compressible
+			data = compressibleText(int(r.Int63n(300<<10)) + 1)
+		case 1: // incompressible
+			data = make([]byte, r.Int63n(200<<10)+1)
+			r.Read(data)
+		case 2: // barely compressible: around the 5% minimum
+			data = make([]byte, 128<<10)
+			r.Read(data)
+			copy(data, bytes.Repeat([]byte{0}, int(r.Int63n(16<<10))))
+		default: // an existing frame, re-encoded with Recompress
+			text := compressibleText(int(r.Int63n(100<<10)) + 1)
+			files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/f%03d.bin", i), Data: text, Extent: frameAt(t, text, zstd.SpeedFastest), Codec: 1})
+			continue
+		}
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/f%03d.bin", i), Data: data})
+	}
+	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	defer func(w int, c int64) { testWorkers, parChunk = w, c }(testWorkers, parChunk)
+	var want [32]byte
+	for _, c := range []struct {
+		workers int
+		chunk   int64
+	}{{1, 32 << 20}, {3, 32 << 20}, {8, 32 << 20}, {4, 0}} {
+		testWorkers, parChunk = c.workers, c.chunk
+		opts := defaultOptions()
+		opts.MinSavings = 5
+		opts.Recompress = true
+		opts.Output = filepath.Join(dir, fmt.Sprintf("out-%d-%d.nup", c.workers, c.chunk))
+		optimizeT(t, in, opts)
+		got := fileSHA(t, opts.Output)
+		if want == ([32]byte{}) {
+			want = got
+		} else if got != want {
+			t.Errorf("workers=%d chunk=%d: output differs", c.workers, c.chunk)
+		}
+	}
+}
+
+// TestOptimizeParallelCancelReleasesBudget: cancelling mid-write stops the
+// workers, removes the partial file and returns every claimed byte and CPU
+// token to the shared budgets.
+func TestOptimizeParallelCancelReleasesBudget(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.nup")
+	var files []nuptest.File
+	for i := 0; i < 64; i++ {
+		files = append(files, nuptest.File{Path: fmt.Sprintf("romfs/t%02d.txt", i), Data: compressibleText(512 << 10)})
+	}
+	if err := nuptest.WriteKaiDump(in, []nuptest.Package{{TitleID: testTID, Kind: 0, Files: files}}, nuptest.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	opts := defaultOptions()
+	opts.Output = filepath.Join(dir, "out.nup")
+	opts.Progress = func(label string, pct float64) {
+		if label == "Optimizing NUP files" && pct > 20 {
+			cancel()
+		}
+	}
+	if _, err := Optimize(ctx, in, opts); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want cancellation", err)
+	}
+	assertNoPartials(t, dir)
+	if pathExists(opts.Output) {
+		t.Error("output published after cancellation")
+	}
+	for _, b := range []*budget{memBudget, cpuTokens} {
+		b.mu.Lock()
+		used := b.used
+		b.mu.Unlock()
+		if used != 0 {
+			t.Errorf("budget still holds %d after cancellation", used)
+		}
 	}
 }
