@@ -49,44 +49,15 @@ func BuildSnapshotNSP(ctx context.Context, pkg nup.Package, output string, verif
 		if merr := os.MkdirAll(filepath.Dir(target), 0o755); merr != nil {
 			return nil, merr
 		}
-		out, oerr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-		if oerr != nil {
-			return nil, oerr
-		}
-		r, rerr := source.Open()
-		if rerr != nil {
-			out.Close()
-			return nil, rerr
-		}
-		count := int64(0)
-		buf := make([]byte, 1<<20)
-		for {
-			binfmt.Check(ctx)
-			n, rerr := r.Read(buf)
-			if n > 0 {
-				if _, werr := out.Write(buf[:n]); werr != nil {
-					r.Close()
-					out.Close()
-					return nil, werr
-				}
-				count += int64(n)
-				done += int64(n)
-				binfmt.Require(count <= source.Size(), "Source size changed.")
-				if progress != nil {
-					progress("Preparing snapshot", 20*float64(done)/float64(max64(total, 1)))
-				}
+		count, cerr := copySnapshotFile(ctx, source, target, func(n int64) {
+			done += n
+			if progress != nil {
+				progress("Preparing snapshot", 20*float64(done)/float64(max64(total, 1)))
 			}
-			if rerr == io.EOF {
-				break
-			}
-			if rerr != nil {
-				r.Close()
-				out.Close()
-				return nil, rerr
-			}
+		})
+		if cerr != nil {
+			return nil, cerr
 		}
-		r.Close()
-		out.Close()
 		binfmt.Require(count == source.Size(), "Incomplete snapshot file.")
 		if verr := source.Validate(); verr != nil {
 			return nil, verr
@@ -168,6 +139,44 @@ func BuildSnapshotNSP(ctx context.Context, pkg nup.Package, output string, verif
 		return nil, berr
 	}
 	return map[string]any{"output": output, "size": report.Size, "verified": verify}, nil
+}
+
+// copySnapshotFile copies source into a new file at target and returns the
+// number of bytes copied, calling onChunk after each chunk. Both handles are
+// closed by defer on every exit, including the binfmt panics raised on
+// cancellation or a size change, so a failed snapshot leaves nothing open in
+// its temp dir and the deferred cleanup can remove it.
+func copySnapshotFile(ctx context.Context, source *nup.Source, target string, onChunk func(n int64)) (count int64, err error) {
+	binfmt.Check(ctx)
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer out.Close()
+	r, err := source.Open()
+	if err != nil {
+		return 0, err
+	}
+	defer r.Close()
+	buf := make([]byte, 1<<20)
+	for {
+		binfmt.Check(ctx)
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				return count, werr
+			}
+			count += int64(n)
+			binfmt.Require(count <= source.Size(), "Source size changed.")
+			onChunk(int64(n))
+		}
+		if rerr == io.EOF {
+			return count, nil
+		}
+		if rerr != nil {
+			return count, rerr
+		}
+	}
 }
 
 // NupToNsp converts a NUP archive into NSP(s), the port of nup_tools.nup_to_nsp.
