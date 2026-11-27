@@ -14,9 +14,9 @@ var ErrNoSpace = errors.New("Not enough free space for the worst-case NUP size."
 const headroom = 32 << 20
 
 type reservation struct {
-	volume string
-	need   int64
-	temp   string // the file being written; its current size is already off the free space
+	volume  string
+	need    int64
+	written func() int64 // bytes written so far; they are already off the free space
 }
 
 var (
@@ -30,6 +30,18 @@ var (
 // so far; each reservation therefore only counts what its temp file may
 // still grow by. Release once the file is committed or removed.
 func Reserve(dir, temp string, need int64) (release func(), err error) {
+	return ReserveFunc(dir, func() int64 {
+		if st, err := os.Stat(temp); err == nil {
+			return st.Size()
+		}
+		return 0
+	}, need)
+}
+
+// ReserveFunc is Reserve for output that is not one file: written reports
+// how many bytes the job has written so far. It is called with the
+// package's lock held and must not call back into this package.
+func ReserveFunc(dir string, written func() int64, need int64) (release func(), err error) {
 	vol, err := volumeKey(dir)
 	if err != nil {
 		return nil, err
@@ -45,10 +57,7 @@ func Reserve(dir, temp string, need int64) (release func(), err error) {
 		if r.volume != vol {
 			continue
 		}
-		left := r.need
-		if st, err := os.Stat(r.temp); err == nil {
-			left -= st.Size()
-		}
+		left := r.need - r.written()
 		if left > 0 {
 			pending += left
 		}
@@ -56,7 +65,7 @@ func Reserve(dir, temp string, need int64) (release func(), err error) {
 	if need < 0 || free < uint64(pending)+uint64(need)+headroom {
 		return nil, ErrNoSpace
 	}
-	r := &reservation{volume: vol, need: need, temp: temp}
+	r := &reservation{volume: vol, need: need, written: written}
 	held[r] = true
 	return func() {
 		mu.Lock()

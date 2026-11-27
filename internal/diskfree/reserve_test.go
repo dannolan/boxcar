@@ -54,3 +54,43 @@ func TestReserveSharesFreeSpace(t *testing.T) {
 		t.Errorf("reservation larger than the volume: err = %v", err)
 	}
 }
+
+func TestIsFATOnTempDir(t *testing.T) {
+	fat, err := IsFAT(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fat {
+		t.Skip("the temporary folder is on a FAT volume")
+	}
+}
+
+// TestReserveFuncCountsWritten: what a job has written is no longer
+// pending, so a second job can claim it.
+func TestReserveFuncCountsWritten(t *testing.T) {
+	dir := t.TempDir()
+	free, err := Available(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	need := int64(free) - headroom - 1<<20 // 1 MiB slack for other writers
+	if need <= headroom {
+		t.Skip("no free space")
+	}
+	var written int64
+	release, err := ReserveFunc(dir, func() int64 { return written }, need)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if r, err := Reserve(dir, filepath.Join(dir, "x"), headroom); err == nil {
+		r()
+		t.Fatal("second reservation fit although the first claims almost everything")
+	}
+	written = need // as if written: the OS already counts it
+	r, err := Reserve(dir, filepath.Join(dir, "x"), headroom/2)
+	if err != nil {
+		t.Fatalf("written bytes still counted as pending: %v", err)
+	}
+	r()
+}
