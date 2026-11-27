@@ -289,6 +289,15 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 		}
 		measuring = true // the estimate may be wrong: let the real size decide
 	}
+	// Re-encoding existing frames has no estimate (a frame does not record
+	// its level), so when that is the only reason to rewrite, the real size
+	// decides too: a second --recompress run writes nothing.
+	recompressOnly := worthwhile && opts.Recompress && !opts.Force && !res.ContentChanged &&
+		r.plan.PolicyFixes == 0 && len(r.plan.Deviations) == 0 &&
+		r.plan.EstimatedSavings < max64(int64(math.Ceil(float64(r.plan.ArchiveSize)*opts.MinGain/100)), 1)
+	if recompressOnly {
+		measuring = true
+	}
 
 	final := abs
 	mode := os.FileMode(0o666)
@@ -376,6 +385,9 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 		}
 		res.Reason = fmt.Sprintf("measured: a full rewrite saved %.2f%% although the %s estimate was below the minimum gain",
 			100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)), r0basis(res.Plan))
+		if recompressOnly {
+			res.Reason = fmt.Sprintf("measured: recompressing saved %.2f%%", 100*float64(res.SavedBytes)/float64(max64(res.SizeBefore, 1)))
+		}
 	}
 	if opts.InPlace {
 		if res.SizeAfter >= res.SizeBefore && !fixes && !opts.Force {
@@ -461,7 +473,7 @@ func (p Plan) verdict(minGain float64, changed, recompress bool) (string, bool) 
 		return fmt.Sprintf("%d compressed file(s) break the storage policy and will be rewritten", p.PolicyFixes), true
 	case recompress && p.Reencode > 0:
 		return fmt.Sprintf("%d compressed file(s) will be recompressed; the estimate assumes no gain, "+
-			"and in place the original is kept unless the result is smaller", p.Reencode), true
+			"so the result is kept only if it reaches the minimum gain (at least one byte)", p.Reencode), true
 	}
 	percent := 100 * float64(p.EstimatedSavings) / float64(max64(p.ArchiveSize, 1))
 	need := int64(math.Ceil(float64(p.ArchiveSize) * minGain / 100))

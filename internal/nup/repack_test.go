@@ -313,9 +313,20 @@ func TestOptimizeRecompress(t *testing.T) {
 		t.Errorf("a re-encode estimate is not exact: %+v", plan)
 	}
 	opts.DryRun = false
+	// The re-encode saves 32 bytes here: below a 1% minimum gain the
+	// measured result is discarded, with no minimum it is kept.
+	if res := optimizeT(t, in, opts); res.Status != "skipped" || pathExists(opts.Output) {
+		t.Fatalf("recompression below the minimum gain was kept: %+v", res)
+	}
+	opts.MinGain = 0
 	res := optimizeT(t, in, opts)
 	if res.Status != "optimized" || res.Plan.Reencode == 0 {
 		t.Fatalf("result = %+v", res)
+	}
+	again := opts
+	again.Output = filepath.Join(dir, "again.nup")
+	if res := optimizeT(t, opts.Output, again); res.Status != "skipped" || pathExists(again.Output) {
+		t.Errorf("a second --recompress run wrote an output: %+v", res)
 	}
 	s := res.Stats
 	if s.Recompressed+s.ReusedFrames != res.Plan.Reencode || s.Decompressed != 0 {
