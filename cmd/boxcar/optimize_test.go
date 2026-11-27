@@ -327,7 +327,7 @@ func TestOptimizeProfiles(t *testing.T) {
 	}{
 		{nil, 3, true, 128 << 20, 5, false},
 		{[]string{"--profile", "archive"}, 19, false, 256 << 20, 0, true},
-		{[]string{"--profile", "Fast"}, 1, true, 256 << 20, 0, false},
+		{[]string{"--profile", "Fast"}, 1, true, 128 << 20, 5, false},
 		{[]string{"--profile", "archive", "--preset", "Balanced", "--recompress=false"}, 3, false, 256 << 20, 0, false},
 		{[]string{"--min-savings", "0", "--large-file-threshold", "32MiB"}, 3, true, 32 << 20, 0, false},
 		{[]string{"--no-large-files-raw"}, 3, false, 128 << 20, 5, false},

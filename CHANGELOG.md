@@ -58,6 +58,28 @@
   runs on all CPUs; `--jobs 0` runs up to four archives at once. Mario
   Party Superstars (2.9 GB) 10.9 s -> about 3.5 s, Animal Crossing
   (6.7 GB, 67k files) 39.6 s -> about 9-10 s on 8 CPUs.
+- **Optimizer working-memory budget.** Encoders (all levels, including
+  zstd 19), decoders, read-ahead, estimation, verification and `Pack`
+  reserve from one process-wide budget shared by concurrent archives:
+  automatic (1/8 of RAM within 256 MiB-2 GiB) or `--memory SIZE`. Writes
+  adapt their worker count to it, cannot deadlock each other, and return
+  everything on cancellation. The budget bounds working memory, not RSS.
+- **Windows in-place replacement handles `ReplaceFileW` partial
+  failures.** The original is always moved to a backup name and the
+  outcome is checked by file ID: 1176-style failures keep the original,
+  1177 (original moved, replacement not) moves it back, and if that fails
+  nothing is deleted and the error names both files. Windows tests now run
+  in CI (with simulated failures), which also fixed Pack publishing a still
+  open file on Windows.
+- **Estimation and measurement.** Sampled estimates apply the per-file
+  storage policy (minimum savings) as the writer will; dry runs report
+  action `measure` when a real run would decide by measuring; rewrites that
+  are likely to be discarded are measured with a counting writer first, so
+  already-optimized second runs write nothing (Mario Party 4.2 -> 1.7 s,
+  Animal Crossing 10.5 -> 2.8 s).
+- **`fast` profile uses `runtime`'s storage policy** (128 MiB, 5%) at level
+  1: the policy decides how nx2-flow loads the archive, so only the
+  compression effort differs.
 - **NUP archives in parts (nx2-flow's convention).** Reading accepts the
   first part or a folder of parts in every naming nx2-flow's loader
   accepts; `optimize --split SIZE|fat32|auto|none` writes `<name>.001`,

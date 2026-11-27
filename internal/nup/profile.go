@@ -30,9 +30,13 @@ var Profiles = map[string]RepackOptions{
 	// Archive: storage only. Strongest level, no large-file rule, any saving
 	// kept, existing frames re-encoded when that is smaller.
 	"archive": {Level: LevelBest, LargeRaw: false, MinSavings: 0, Recompress: true},
-	// Fast: throughput first. Fastest level, reference large-file rule,
-	// frames reused; deduplication and verification as always.
-	"fast": {Level: 1, LargeRaw: true, LargeFileThreshold: LargeFile, MinSavings: 0},
+	// Fast: Runtime's storage policy at the fastest level. The policy
+	// decides how the console loads the archive (which files it unpacks
+	// into nx2-flow's cache), so the profile that is chosen for speed does
+	// not change it; only the compression effort differs. (With 0% minimum
+	// savings, Mario Party Superstars got 279 more frames for 0.33% of the
+	// archive, and a 50 MiB file the loader would unpack into its cache.)
+	"fast": {Level: 1, LargeRaw: true, LargeFileThreshold: RuntimeLargeFile, MinSavings: 5},
 }
 
 // DefaultProfile is the optimizer's default.

@@ -77,12 +77,19 @@ minimum gain is 1% of the archive for archives found by searching a folder
 and any saving at all for archives you name explicitly (`--min-gain`
 overrides both). For an explicitly named archive whose estimate is not
 exact (sampled, or `--recompress`, whose gain cannot be estimated), a
-"skip" verdict is not trusted: Boxcar performs the real rewrite, keeps it
-if it saves the minimum gain (at least one byte) and otherwise discards it
-and reports `skipped` with the measured result. A second run over the
-result of `--recompress` or the archive profile therefore writes nothing,
-but it spends the encoding time again, because a zstd frame does not record
-the level it was made with.
+"skip" verdict is not trusted: Boxcar measures the real rewrite, keeps it
+if it saves the minimum gain (at least one byte) and otherwise reports
+`skipped` with the measured result. A dry run says so with action
+`measure` ("would measure"). Such likely-to-be-discarded rewrites, and any
+sampled estimate under 1% of the archive, are first run against a writer
+that only counts bytes, so a skip costs the encoding time but writes
+nothing; a rewrite that does reach the minimum gain is then written and
+verified (one extra pass). Any other rewrite is written to a temporary file
+first, and if its measured size misses the minimum gain it is discarded: a
+skipped rewrite never replaces or publishes anything, but it may have
+written a temporary file. A second run over the result of `--recompress`
+or the archive profile spends the encoding time again, because a zstd
+frame does not record the level it was made with.
 
 Archives whose compressed files break the policy (for example a 1 GiB file
 compressed by another tool while the threshold is 128 MiB) are always
@@ -110,7 +117,7 @@ only one policy implementation; profiles are presets of it.
 |---|---|---|---|---|---|
 | `runtime` (default) | Balanced (3) | above 128 MiB | 5% | reused | archives nx2-flow loads from the card |
 | `archive` | Best (zstd 19) | no | any | re-encoded, smaller kept | storage and transfer only |
-| `fast` | Fast (1) | above 256 MiB | any | reused | quick normalization and deduplication |
+| `fast` | Fast (1) | above 128 MiB | 5% | reused | `runtime`'s policy with less compression effort |
 
 Why these values:
 
@@ -124,11 +131,25 @@ Why these values:
   the loader streams the frame in 1 MiB pieces, so the frame size does not.
   Its decoder keeps zstd's default window limit (2^27 = 128 MiB); Boxcar's
   encoder uses an 8 MiB window at every level, so all frames load.
-- **5%** (`runtime`): a heuristic, not a loader limit. A file that zstd
+- **5%** (`runtime`): a heuristic, not an nx2-flow requirement (the
+  loader reads raw and compressed files alike, whatever they save). A file that zstd
   shrinks by less than 5% saves almost nothing on the card but costs a full
   unpack into the cache and decompression time on the console; storing it
   raw lets the loader read it in place. Measured on Mario Party Superstars
   it keeps 0.4% of the archive raw that 0% would compress.
+- **`fast` = `runtime`'s policy at level 1.** The storage policy decides
+  how nx2-flow loads the archive (which files it unpacks into its cache),
+  so a profile picked for speed keeps it and only spends less compression
+  effort. Measured (8 CPUs, warm cache): with the former `fast` policy
+  (256 MiB, any saving) Mario Party Superstars came out 0.33% smaller but
+  with 509 frames instead of 230, including a 50 MiB file that saves under
+  5%, so nx2-flow's cache would be 192 MiB instead of 114 MiB; Animal
+  Crossing 0.17% smaller with 2,831 frames instead of 2,234. Run times
+  differed by less than run-to-run noise (Mario 5.1 vs 4.6 s, Animal
+  Crossing 8.6 vs 8.7 s): these games are mostly incompressible, so reading,
+  hashing and writing dominate, and `fast` is not reliably faster than
+  `runtime` on them. It pays off on archives with much compressible data
+  (see [BENCHMARKS.md](BENCHMARKS.md)).
 - **Best** (`archive`): klauspost's `SpeedBestCompression`, offered for
   `optimize` only (`pack` keeps the reference levels 1, 3 and 9). On the
   synthetic benchmarks it is 2-3% smaller than Balanced on compressible
@@ -198,7 +219,17 @@ than inventing one:
   the path still holds the very file that was read (same file identity,
   size and modification time, checked again right before the swap). The
   swap is one atomic rename on macOS and Linux and `ReplaceFileW` on
-  Windows. Concurrent Boxcar runs on the same archive are excluded with a
+  Windows. `ReplaceFileW` is not atomic and can fail half way
+  (`ERROR_UNABLE_TO_MOVE_REPLACEMENT_2` leaves nothing at the name), so
+  Boxcar always has it move the original to a backup name beside it
+  (`<name>.nup.<random>.boxcar-backup`) and then checks, by file ID, what
+  is where before it reports anything: the new file in place is success
+  (the backup is then deleted); the original still in place is a failure
+  with the original kept; the original only at the backup name is moved
+  back and reported as a failure. If moving it back fails, nothing is
+  deleted and the error names the backup and the verified optimized copy
+  so either can be renamed into place. The only recoverable copy is never
+  deleted. These paths run in CI on Windows with the failures simulated. Concurrent Boxcar runs on the same archive are excluded with a
   lock: `flock` on the archive (macOS/Linux) or a hidden
   `<name>.nup.boxcar-lock` file opened without sharing and deleted on close
   (Windows). If the lock cannot be taken because the filesystem does not
@@ -231,32 +262,50 @@ than inventing one:
 - Errors and Ctrl-C remove the partial file and leave the original as it
   was. A second Ctrl-C exits immediately. After a hard kill or power loss the
   original is still intact; a stray `*.partial` file may remain and can be
-  deleted.
+  deleted. On Windows a hard kill in the middle of `ReplaceFileW` can leave
+  the original under its `*.boxcar-backup` name; rename it back.
 - In a batch, a failing archive is reported and the others continue. The
   exit status is 1 if any archive failed.
 
 `--in-place` needs free space for one complete optimized copy on the same
-drive while it works. Memory use does not depend on how large the files
-are: files above 32 MiB stream through fixed buffers, and smaller ones are
-read ahead into a shared 128 MiB pool (see [Concurrency](#concurrency-and-resources)).
-It grows with how many files the archive holds, because their table is kept
-in memory. Measured peaks (8 CPUs, `runtime`): Mario Party Superstars
-(2.9 GB, 820 files) about 300 MB, Animal Crossing (6.7 GB, 67,000 files)
-about 550 MB; the `archive` profile adds roughly 300 MB of encoder state.
+drive while it works. Memory is governed by one working-memory budget (see
+[Concurrency](#concurrency-and-resources)); it does not depend on how large
+the files are. Measured peak RSS is in [Benchmarks](#benchmarks).
 
 ## Concurrency and resources
 
 - **Inside one archive**, files up to 32 MiB that are compressed or
-  re-encoded are read, checked and encoded by one worker per CPU while a
-  single writer writes them in layout order, so the output is byte for byte
-  the same for any number of workers. Larger files stream on the writer.
-  Workers share encoders, and a raw fallback is written from memory without
-  reading the source again. Verification of the new archive also checks
-  its distinct extents on every CPU.
-- **Budgets are process-wide**: one CPU token per CPU (held while
-  encoding or verifying) and 128 MiB of read-ahead buffers, shared by all
-  archives of a run; the pool and the encoders are released when no archive
-  is being written. Cancelling returns every claim.
+  re-encoded are read, checked and encoded by up to one worker per CPU
+  while a single writer writes them in layout order, so the output is byte
+  for byte the same for any number of workers. Larger files stream on the
+  writer. A raw fallback is written from memory without reading the source
+  again. Verification of the new archive also checks its distinct extents
+  on several CPUs.
+- **CPU**: one token per CPU, held while encoding or verifying, shared by
+  all archives of a run.
+- **Working memory**: one budget shared by all archives of a run,
+  automatic by default (an eighth of physical memory, between 256 MiB and
+  2 GiB) or set with `--memory SIZE`. Everything sizeable is reserved from
+  it before it is allocated: each encoder (measured for klauspost's
+  encoders with Boxcar's 8 MiB window: 10 MiB at Fast, 20 MiB at Balanced,
+  23 MiB at Smaller and 56 MiB at Best, the level-19 `archive` profile),
+  each decoder (its frame window plus 2 MiB), the read buffers, the bytes
+  workers read and encode ahead of the writer (up to 128 MiB per archive,
+  never less than its largest job), the estimator's encoder and
+  verification's decoders. A write reserves its writer, its workers and
+  its read-ahead in one step while it holds nothing else, and takes fewer
+  workers when the budget is short, so archives never wait on each other in
+  a cycle; a reservation larger than the whole budget is granted when
+  nothing else holds memory, so a small budget slows work down rather than
+  failing it. Cancelling or failing returns every reservation. There are no
+  process-wide pools left between archives.
+- **Working memory is not RSS.** The budget bounds what Boxcar's
+  optimizer holds; the process also has the file table and the plan (they grow
+  with the number of files), the Go
+  runtime's own overhead, and freed memory the runtime has not returned to
+  the OS yet. Expect peak RSS around the budget in use plus that. Boxcar
+  does not set `GOMEMLIMIT`; if you set it, it is a target for the garbage
+  collector, not a hard cap.
 - **Across archives**, `--jobs 0` (default) runs min(archives, 4, CPUs/2)
   at once, because each archive's planning, writer and commit are serial.
   Measured on 8 CPUs: four 125 MB archives 2.3 s with one job, 1.4 s with
@@ -271,9 +320,10 @@ about 550 MB; the `archive` profile adds roughly 300 MB of encoder state.
 |---|---|---|
 | `--output PATH` | | New archive: a `.nup` path for one archive, otherwise a folder that receives the archives under their relative paths (that folder is never searched for inputs) |
 | `--in-place` | off | Replace each archive after its rewrite is verified |
-| `--dry-run` | off | Plan and estimate only; nothing is written |
+| `--dry-run` | off | Plan and estimate only; nothing is written (action `measure` = a real run would decide by measuring) |
 | `--recursive` | off | Also search subfolders of folder inputs |
 | `--jobs N` | 0 (auto) | Archives optimized at the same time; 0 = min(archives, 4, CPUs/2) |
+| `--memory SIZE` | `auto` | Working-memory budget shared by all archives (`auto` = 1/8 of RAM within 256 MiB-2 GiB); workers adapt to it |
 | `--profile` | `runtime` | Storage policy preset: `runtime`, `archive` or `fast` (see [Profiles](#profiles)); the flags below override single settings |
 | `--preset` | profile's | zstd level for files that get compressed: `Fast` (1), `Balanced` (3), `Smaller` (9), `Best` (19) |
 | `--recompress` | profile's | Re-encode already-compressed files with `--preset`, keeping the smaller frame |
@@ -451,15 +501,16 @@ Output of optimizing a small all-raw test archive (abridged):
 |---|---|
 | `optimized` | written, verified and committed, and smaller |
 | `normalized` | written, verified and committed, not smaller, but required: a policy fix, a spec deviation or `--latest-snapshot` |
-| `skipped` | left as it is; `reason` says why (already optimized, measured rewrite too small, in place not smaller) |
-| `planned` | dry run; `action` says `optimize` or `skip` |
+| `skipped` | left as it is; `reason` says why (already optimized, measured rewrite too small, in place not smaller). Nothing was replaced or published; a measured skip may have written and removed a temporary file |
+| `planned` | dry run; `action` says `optimize`, `skip` or `measure` |
 | `failed` | see `error`; nothing was written or replaced |
 
 Every written archive is verified, so `verified` is true for `optimized`
 and `normalized`. Sizes are bytes. For dry runs `size_after` is the
 estimate. `parts` lists the output's parts when it was written in parts
 (`output` is the first). `policy` echoes the effective settings (profile,
-level, threshold, min savings, recompress, jobs, `split_size`). `plan`
+level, threshold, min savings, recompress, jobs, `split_size`,
+`memory_budget`). `plan`
 describes the decisions per distinct content (`reuse_frames`, `compress`,
 `reencode`, `decode`, `keep_raw`, `duplicate_files`, `redundant_bytes`,
 `better_extents`, `policy_fixes`) and the estimate's `savings_basis`;
@@ -471,6 +522,15 @@ or planned, and 1 when any failed or the arguments were unusable.
 ## Limitations
 
 - Archives in parts cannot be replaced in place; write them to `--output`.
+- Publishing parts is not atomic as a whole: parts are published last to
+  first and removed again if one fails, but a crash or power loss in the
+  middle can leave the later parts under their final names without the
+  first one. nx2-flow ignores them (it needs the first part); delete them
+  or rerun. Stray `*.partial` temporary parts can be deleted.
+- Validation on a real Switch 2 with nx2-flow is still pending: the
+  `runtime` profile follows nx2-flow's loader source (0.1.7) and its split
+  convention, and the split output is checked against that convention's
+  reader, but it has not been loaded on a console yet.
 - Archives with a superblock extension Boxcar does not know (header size
   other than 0x80 or header version other than 1) are refused rather than
   rewritten.

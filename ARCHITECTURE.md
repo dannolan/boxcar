@@ -195,7 +195,10 @@ every push with a pinned reference checkout.
   sanctioned replacement is `nup.Optimize` in in-place mode: only after the
   temp file is verified and the source's identity, size and mtime are
   re-checked, through `replaceFile` (POSIX `rename`; Windows `ReplaceFileW`,
-  which keeps ACLs/attributes/streams), after `prepareReplacement` copied
+  which keeps ACLs/attributes/streams, always with a backup name, after
+  which the result is settled by file ID: success, original kept, original
+  moved back, or `keepFilesError` naming the kept files, whose temp file
+  `Optimize` must not delete), after `prepareReplacement` copied
   mode, owner and xattrs (POSIX; failure keeps the original), under a lock
   that must succeed (`flock` on POSIX, a no-share delete-on-close sidecar
   on Windows). New outputs (`nup.Optimize`, `nup.Pack`) use `commitNew`: a
@@ -210,9 +213,18 @@ every push with a pinned reference checkout.
 - **Streaming only**: never read game files or outputs fully into memory;
   compose with `stream` and write via `WriteTo`. The one bounded exception
   is the optimizer's parallel path (`internal/nup/parallel.go`): files up
-  to 32 MiB are read ahead into 1 MiB chunks claimed from a process-wide
-  128 MiB budget, and CPU work holds one of GOMAXPROCS tokens; larger files
+  to 32 MiB are read ahead into 1 MiB chunks from the write's own job
+  allowance, and CPU work holds one of GOMAXPROCS tokens; larger files
   stream. Output order and bytes do not depend on the worker count.
+- **Working-memory budget** (`membudget.go`): one process-wide byte budget
+  (`SetMemoryBudget`, automatic by default). Every phase that holds
+  sizeable buffers reserves them first, while holding nothing else from
+  the budget: a write reserves writer + workers (encoder per level from
+  `encoderCost`, decoder per window from `decoderCost`) + job allowance in
+  one `reserveFlexible` call that adapts the worker count; estimation,
+  verification and `Pack` reserve their encoder/decoders. Jobs draw only on
+  their write's allowance (at least the largest job), so archives never
+  wait on each other in a cycle. No process-wide encoder or chunk pools.
 - **Archives in parts** follow nx2-flow's `nupparts.h` exactly (`parts.go`);
   Boxcar writes only `<name>.NNN` parts of one size, publishes them last to
   first with `commitNew`, and never replaces parts in place.
