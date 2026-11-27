@@ -204,6 +204,13 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	}
 	res = OptimizeResult{Input: abs, InPlace: opts.InPlace}
 	binfmt.Require(!isLinked(abs), "Linked input files are not supported.")
+	if opts.InPlace && !opts.DryRun {
+		unlock, lerr := lockSource(abs)
+		if lerr != nil {
+			return res, lerr
+		}
+		defer unlock()
+	}
 
 	report("Analyzing NUP", 0)
 	a, oerr := Open(ctx, abs)
@@ -260,6 +267,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	}
 
 	final := abs
+	mode := os.FileMode(0o666)
 	if opts.InPlace {
 		st, serr := os.Stat(abs)
 		if serr != nil {
@@ -268,6 +276,7 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 		if err := replaceable(st); err != nil {
 			return res, err
 		}
+		mode = st.Mode().Perm() // the copy must never be readable by more users than the original
 	} else {
 		binfmt.Require(opts.Output != "", "Choose an output path or in-place mode.")
 		final, aerr = filepath.Abs(opts.Output)
@@ -288,11 +297,11 @@ func Optimize(ctx context.Context, path string, opts OptimizeOptions) (res Optim
 	binfmt.Require(free >= uint64(r.plan.WorstCaseSize)+32*1024*1024, "Not enough free space for the worst-case NUP size.")
 
 	temp := final + "." + randomHex() + ".partial"
-	defer func() { _ = os.Remove(temp) }()
-	out, cerr := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o666)
+	out, cerr := os.OpenFile(temp, os.O_RDWR|os.O_CREATE|os.O_EXCL, mode)
 	if cerr != nil {
 		return res, cerr
 	}
+	defer func() { _ = os.Remove(temp) }()
 	stats, werr := r.write(out, func(done, total int64) {
 		report("Optimizing NUP files", 2+78*float64(done)/float64(max64(total, 1)))
 	})
@@ -367,13 +376,14 @@ func skipped(res OptimizeResult, reason string, report func(string, float64)) Op
 }
 
 // replaceSource swaps the verified temp file over the source archive after
-// checking the source is still the file that was read.
+// checking the source is still the very file that was read.
 func replaceSource(path, temp string, stamp archiveStamp) error {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || isLinked(path) || st.Size() != stamp.size || st.ModTime().UnixNano() != stamp.mtime {
+	if !st.Mode().IsRegular() || isLinked(path) || !os.SameFile(st, stamp.info) ||
+		st.Size() != stamp.size || st.ModTime().UnixNano() != stamp.mtime {
 		return errors.New("NUP changed while it was being optimized; the original was kept.")
 	}
 	return replaceFile(temp, path, st.Mode().Perm())

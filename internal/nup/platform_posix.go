@@ -6,13 +6,15 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"syscall"
 )
 
 // commitNew moves temporary onto output without overwriting an existing
-// file, like commitFile. On filesystems without hard links (exFAT and FAT32
-// SD cards) output is first claimed with O_EXCL and the claim is then
-// atomically replaced by rename(2). Once output is linked the commit has
-// happened; failing to drop the temporary name only leaves clutter.
+// file, like commitFile. Filesystems without hard links (exFAT and FAT32 SD
+// cards) get an exclusive rename instead, and only where that is not
+// available either is output claimed with O_EXCL and the claim replaced by
+// rename(2). Once output is linked the commit has happened; failing to drop
+// the temporary name only leaves clutter.
 func commitNew(temporary, output string) error {
 	err := os.Link(temporary, output)
 	switch {
@@ -21,22 +23,61 @@ func commitNew(temporary, output string) error {
 		return nil
 	case errors.Is(err, fs.ErrExist):
 		return err
-	default:
+	}
+	err = renameNoReplace(temporary, output)
+	if errors.Is(err, errors.ErrUnsupported) || errors.Is(err, syscall.EINVAL) {
 		return claimAndRename(temporary, output)
 	}
+	return err
 }
 
+// claimAndRename is the last-resort exclusive commit: it creates output
+// with O_EXCL and renames temporary over that claim, giving up (and
+// removing the claim) if the claim was replaced in between.
 func claimAndRename(temporary, output string) error {
 	claim, err := os.OpenFile(output, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o666)
 	if err != nil {
 		return err
 	}
+	claimed, err := claim.Stat()
 	claim.Close()
+	if err != nil {
+		return err
+	}
+	ours := func() bool {
+		st, err := os.Lstat(output)
+		return err == nil && st.Size() == 0 && os.SameFile(st, claimed)
+	}
+	if !ours() {
+		return errors.New("Output appeared while it was being written; choose a new filename.")
+	}
 	if err := os.Rename(temporary, output); err != nil {
-		_ = os.Remove(output)
+		if ours() {
+			_ = os.Remove(output)
+		}
 		return err
 	}
 	return nil
+}
+
+// lockSource holds an advisory lock on path for an in-place rewrite so two
+// optimizers cannot replace the same archive at once. Filesystems without
+// flock are used unlocked.
+func lockSource(path string) (func(), error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	switch err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); {
+	case err == nil:
+		return func() { f.Close() }, nil
+	case errors.Is(err, syscall.EWOULDBLOCK):
+		f.Close()
+		return nil, errors.New("Another process is optimizing this NUP.")
+	default:
+		f.Close()
+		return func() {}, nil
+	}
 }
 
 // replaceable reports why a file cannot be replaced in place; rename(2)
@@ -45,7 +86,9 @@ func replaceable(os.FileInfo) error { return nil }
 
 // replaceFile atomically swaps temporary over an existing output: rename(2)
 // leaves either the old or the new file at output, never a partial one. The
-// output's permissions are copied where the filesystem keeps them.
+// output's permissions are copied where the filesystem keeps them; the
+// temporary file was created with them, so a failed chmod can only leave it
+// narrower.
 func replaceFile(temporary, output string, perm os.FileMode) error {
 	if st, err := os.Stat(temporary); err == nil && st.Mode().Perm() != perm {
 		_ = os.Chmod(temporary, perm)

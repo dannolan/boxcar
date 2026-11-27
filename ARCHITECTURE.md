@@ -193,10 +193,12 @@ every push with a pinned reference checkout.
   sanctioned replacement is `nup.Optimize` in in-place mode: only after the
   temp file is verified and the source's size/mtime are re-checked, through
   `replaceFile` (POSIX `rename`; Windows `MoveFileEx` with
-  `REPLACE_EXISTING|WRITE_THROUGH`). For new outputs `nup.Optimize` uses
-  `commitNew`: `commitFile`, falling back on POSIX filesystems without hard
-  links (exFAT/FAT32) to an `O_EXCL` claim replaced by `rename`, which
-  still never overwrites an existing file.
+  `REPLACE_EXISTING|WRITE_THROUGH`), under an advisory `flock` on POSIX and
+  after checking the path still holds the opened file (`os.SameFile`). For
+  new outputs `nup.Optimize` uses `commitNew`: a hard link as in
+  `commitFile`, else (exFAT/FAT32) an exclusive rename (`renameat2`
+  `RENAME_NOREPLACE` on Linux, `renamex_np` `RENAME_EXCL` on macOS), else
+  an `O_EXCL` claim replaced by `rename` only while it is still the claim.
 - **Links refused**: symlinks everywhere; reparse points on Windows
   (`patch_windows.go`/`platform_windows.go`). Error text mirrors Python.
 - **No mmap**: all random access goes through `internal/region`.
@@ -240,7 +242,8 @@ when there is nothing to save.
 ## Dependency policy
 
 Runtime deps: `github.com/klauspost/compress` (nup only), `golang.org/x/image`
-(artwork only), `golang.org/x/sys` (windows platform files only). Everything
+(artwork only), `golang.org/x/sys` (platform files only: Windows APIs, and
+exclusive rename in `internal/nup/rename_{linux,darwin}.go`). Everything
 else is stdlib. Adding a fourth requires an ARCHITECTURE.md update and a
 strong justification — the point of the port is a small, auditable binary.
 

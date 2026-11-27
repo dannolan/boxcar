@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +35,93 @@ func TestClaimAndRenameNeverOverwrites(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(out); string(got) != "new" || pathExists(temp) {
 		t.Errorf("output %q, temp left: %v", got, pathExists(temp))
+	}
+}
+
+func TestRenameNoReplace(t *testing.T) {
+	dir := t.TempDir()
+	temp := filepath.Join(dir, "t")
+	out := filepath.Join(dir, "out")
+	for _, f := range []string{temp, out} {
+		if err := os.WriteFile(f, []byte(filepath.Base(f)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := renameNoReplace(temp, out)
+	if errors.Is(err, errors.ErrUnsupported) {
+		t.Skip("no exclusive rename on this system")
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("existing output: err = %v", err)
+	}
+	if got, _ := os.ReadFile(out); string(got) != "out" {
+		t.Errorf("existing output was replaced")
+	}
+	os.Remove(out)
+	if err := renameNoReplace(temp, out); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(out); string(got) != "t" || pathExists(temp) {
+		t.Errorf("rename did not move the file")
+	}
+}
+
+func TestLockSourceExcludesSecondOptimizer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "game.nup")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockSource(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockSource(path); err == nil || !strings.Contains(err.Error(), "Another process") {
+		t.Fatalf("second lock: err = %v", err)
+	}
+	if _, err := Optimize(t.Context(), path, OptimizeOptions{InPlace: true, Force: true}); err == nil ||
+		!strings.Contains(err.Error(), "Another process") {
+		t.Errorf("optimizing a locked archive: err = %v", err)
+	}
+	unlock()
+	again, err := lockSource(path)
+	if err != nil {
+		t.Fatalf("lock after unlock: %v", err)
+	}
+	again()
+}
+
+// TestOptimizeInPlaceKeepsPrivateArchivePrivate: the partial copy of a 0600
+// archive is never readable by anyone else, even while it is written.
+func TestOptimizeInPlaceKeepsPrivateArchivePrivate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "game.nup")
+	writeKaiDump(t, path)
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checked := false
+	opts := defaultOptions()
+	opts.InPlace = true
+	opts.Progress = func(label string, _ float64) {
+		if label != "Optimizing NUP files" {
+			return
+		}
+		partials, _ := filepath.Glob(filepath.Join(dir, "*.partial"))
+		for _, p := range partials {
+			if st, err := os.Stat(p); err == nil {
+				checked = true
+				if st.Mode().Perm()&^0o600 != 0 {
+					t.Errorf("partial file mode %v is wider than the source's 0600", st.Mode().Perm())
+				}
+			}
+		}
+	}
+	optimizeT(t, path, opts)
+	if !checked {
+		t.Fatal("never saw the partial file")
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Errorf("replaced archive mode = %v, want 0600", st.Mode().Perm())
 	}
 }
 

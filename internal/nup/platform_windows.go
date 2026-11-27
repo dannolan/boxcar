@@ -42,6 +42,10 @@ func commitFile(temporary, output string) error {
 // works on exFAT and FAT32 volumes.
 func commitNew(temporary, output string) error { return commitFile(temporary, output) }
 
+// lockSource does nothing on Windows; the size, time and identity checks
+// before the replacement still refuse a source that changed.
+func lockSource(string) (func(), error) { return func() {}, nil }
+
 // replaceable reports why a file cannot be replaced in place: MoveFileEx
 // refuses to replace a read-only file.
 func replaceable(st os.FileInfo) error {

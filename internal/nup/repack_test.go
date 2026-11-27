@@ -721,6 +721,41 @@ func TestOptimizeProgressIsMonotonic(t *testing.T) {
 	}
 }
 
+// TestReplaceSourceRefusesAnotherFile: a different file with the same size
+// and modification time at the source path must not be replaced.
+func TestReplaceSourceRefusesAnotherFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "game.nup")
+	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := archiveStamp{size: st.Size(), mtime: st.ModTime().UnixNano(), info: st}
+	other := filepath.Join(dir, "other")
+	if err := os.WriteFile(other, []byte("restored"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(other, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(other, path); err != nil {
+		t.Fatal(err)
+	}
+	temp := filepath.Join(dir, "game.nup.partial")
+	if err := os.WriteFile(temp, []byte("rewrite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceSource(path, temp, stamp); err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("replaceSource = %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "restored" {
+		t.Errorf("the other file was replaced: %q", got)
+	}
+}
+
 // flipByte flips one byte of path at off.
 func flipByte(t *testing.T, path string, off int64) {
 	t.Helper()

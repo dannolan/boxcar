@@ -33,6 +33,7 @@ type dirRecord struct {
 type archiveStamp struct {
 	size  int64
 	mtime int64
+	info  os.FileInfo // identity of the file that was opened
 }
 
 type extentKey struct{ off, end int64 }
@@ -87,7 +88,7 @@ func Open(ctx context.Context, path string) (a *Archive, err error) {
 	if err != nil {
 		return nil, err
 	}
-	a.stamp = archiveStamp{size: st.Size(), mtime: st.ModTime().UnixNano()}
+	a.stamp = archiveStamp{size: st.Size(), mtime: st.ModTime().UnixNano(), info: st}
 	a.parse(ctx)
 	success = true
 	return a, nil
